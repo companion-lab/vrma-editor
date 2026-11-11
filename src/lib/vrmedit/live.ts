@@ -1,0 +1,322 @@
+// Live model editing: applies ModelEdits directly to the loaded three.js VRM
+// so edits preview immediately. The same edits are stored in the editor state
+// and re-applied to the original file's glTF JSON on export (exportModel.ts).
+
+import type { VRM } from '@pixiv/three-vrm';
+import type { MaterialEdit, ModelEdits } from '../../store';
+import { BONE_ORDER } from '../humanoid';
+import { applyAssetVisibilityAll } from './parts';
+import {
+  DoubleSide,
+  FrontSide,
+  TextureLoader,
+  type Color,
+  type Material,
+  type Mesh as TMesh,
+  type Object3D,
+  type Side,
+  type Texture,
+} from 'three';
+
+// three-vrm splits MToon materials into "<name>" and "<name> (Outline)"
+// instances; both map to the same glTF material.
+export function stripOutlineSuffix(name: string): string {
+  return name.replace(/ \(Outline\)$/, '');
+}
+
+export function collectMaterials(vrm: VRM): Material[] {
+  const out: Material[] = [];
+  if (vrm.materials) return vrm.materials;
+  vrm.scene.traverse((o) => {
+    const mat = (o as TMesh).material;
+    if (Array.isArray(mat)) out.push(...mat);
+    else if (mat) out.push(mat);
+  });
+  return out;
+}
+
+export function materialsFor(vrm: VRM, matName: string): Material[] {
+  return collectMaterials(vrm).filter((m) => stripOutlineSuffix(m.name) === matName);
+}
+
+// --- Materials ---
+
+interface MatSnapshot {
+  color?: [number, number, number];
+  emissive?: [number, number, number];
+  opacity: number;
+  transparent: boolean;
+  alphaTest: number;
+  side: Side;
+  map?: Texture;
+}
+const MAT_SNAPSHOTS = new WeakMap<Material, MatSnapshot>();
+
+// Materials may or may not carry color/emissive/map (three Material is a base
+// class) — access them through these narrow casts.
+type ColorMat = Material & { color: Color };
+type EmissiveMat = Material & { emissive: Color };
+type MapMat = Material & { map?: Texture };
+
+function asColorMat(m: Material): ColorMat | null {
+  return 'color' in m ? (m as ColorMat) : null;
+}
+function asEmissiveMat(m: Material): EmissiveMat | null {
+  return 'emissive' in m ? (m as EmissiveMat) : null;
+}
+function asMapMat(m: Material): MapMat | null {
+  return 'map' in m ? (m as MapMat) : null;
+}
+
+/** Capture original material values so "reset" can undo live mutations. Call once after load. */
+export function snapshotMaterials(vrm: VRM): void {
+  for (const m of collectMaterials(vrm)) {
+    if (MAT_SNAPSHOTS.has(m)) continue;
+    const snap: MatSnapshot = {
+      opacity: m.opacity,
+      transparent: m.transparent,
+      alphaTest: m.alphaTest,
+      side: m.side,
+    };
+    const color = asColorMat(m);
+    if (color) snap.color = [color.color.r, color.color.g, color.color.b];
+    const emissive = asEmissiveMat(m);
+    if (emissive) snap.emissive = [emissive.emissive.r, emissive.emissive.g, emissive.emissive.b];
+    const mapMat = asMapMat(m);
+    if (mapMat) snap.map = mapMat.map;
+    MAT_SNAPSHOTS.set(m, snap);
+  }
+}
+
+/** Restore a material's original look and drop its edit record. */
+export function resetMaterialLive(vrm: VRM, matName: string): void {
+  for (const m of materialsFor(vrm, matName)) {
+    const snap = MAT_SNAPSHOTS.get(m);
+    if (!snap) continue;
+    const color = asColorMat(m);
+    if (snap.color && color) color.color.setRGB(snap.color[0], snap.color[1], snap.color[2]);
+    const emissive = asEmissiveMat(m);
+    if (snap.emissive && emissive) emissive.emissive.setRGB(snap.emissive[0], snap.emissive[1], snap.emissive[2]);
+    m.opacity = snap.opacity;
+    m.transparent = snap.transparent;
+    m.alphaTest = snap.alphaTest;
+    m.side = snap.side;
+    const mapMat = asMapMat(m);
+    if (mapMat) mapMat.map = snap.map;
+    m.needsUpdate = true;
+  }
+}
+
+/** Apply one material's edit patch to the live materials. */
+export function applyMaterialEdit(vrm: VRM, matName: string, edit: MaterialEdit): void {
+  for (const m of materialsFor(vrm, matName)) {
+    const color = asColorMat(m);
+    if (edit.color && color) color.color.setRGB(edit.color[0], edit.color[1], edit.color[2]);
+    const emissive = asEmissiveMat(m);
+    if (edit.emissive && emissive) emissive.emissive.setRGB(edit.emissive[0], edit.emissive[1], edit.emissive[2]);
+    if (edit.opacity !== undefined) m.opacity = edit.opacity;
+    if (edit.alphaMode) {
+      // glTF alpha modes → three.js flags (same mapping GLTFLoader uses).
+      if (edit.alphaMode === 'BLEND') {
+        m.transparent = true;
+        m.alphaTest = 0;
+      } else if (edit.alphaMode === 'MASK') {
+        m.transparent = false;
+        m.alphaTest = 0.5;
+      } else {
+        m.transparent = false;
+        m.alphaTest = 0;
+      }
+    }
+    if (edit.doubleSided !== undefined) {
+      m.side = edit.doubleSided ? DoubleSide : FrontSide;
+    }
+    m.needsUpdate = true;
+  }
+}
+
+/** Load an image file as a texture and swap it in as the base color texture. */
+export async function applyTextureReplacement(vrm: VRM, matName: string, file: File): Promise<void> {
+  const url = URL.createObjectURL(file);
+  try {
+    const tex = await new TextureLoader().loadAsync(url);
+    // glTF textures are decoded with flipY=false (UV convention).
+    tex.flipY = false;
+    tex.colorSpace = 'srgb';
+    tex.name = file.name;
+    for (const m of materialsFor(vrm, matName)) {
+      (m as MapMat).map = tex;
+      m.needsUpdate = true;
+    }
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Small square data-URL preview of a material's current base texture (null if none). */
+export function textureThumbDataUrl(vrm: VRM, matName: string, size = 48): string | null {
+  const map = (materialsFor(vrm, matName)[0] as MapMat | undefined)?.map;
+  const img = map?.image as (ImageBitmap | HTMLImageElement | undefined) | undefined;
+  if (!img) return null;
+  const iw = 'naturalWidth' in img ? img.naturalWidth : img.width;
+  const ih = 'naturalHeight' in img ? img.naturalHeight : img.height;
+  if (!iw || !ih) return null;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    // cover-fit into the square
+    const scale = Math.max(size / iw, size / ih);
+    const w = iw * scale;
+    const h = ih * scale;
+    ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+    return canvas.toDataURL('image/png');
+  } catch {
+    return null; // tainted canvas or undrawable image
+  }
+}
+
+// --- Meshes ---
+
+/** Unique mesh display names, sorted. Multi-primitive nodes share one name. */
+export function collectMeshNames(vrm: VRM): string[] {
+  const names = new Set<string>();
+  vrm.scene.traverse((o) => {
+    if ((o as TMesh).isMesh && o.name) names.add(o.name);
+  });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+// (Whole-mesh + per-primitive visibility moved to parts.ts applyAssetVisibilityAll,
+// which combines both lists so merged meshes and their primitives never fight
+// over .visible.)
+
+// --- Expressions ---
+
+export function expressionNames(vrm: VRM): string[] {
+  const map = vrm.expressionManager?.expressionMap;
+  if (!map) return [];
+  return Object.keys(map);
+}
+
+export function applyExpressionWeight(vrm: VRM, name: string, weight: number): void {
+  vrm.expressionManager?.setValue(name, weight);
+}
+
+// --- Bone scale (proportions) ---
+
+// Torso/limb bones compensate their children so the part gets thicker without
+// displacing or inflating its neighbours (scaling a raw bone node otherwise
+// drags child joints along and stretches the skin between them).
+const COMPENSATE_CHILD_SCALE = new Set(['leftShoulder', 'rightShoulder']);
+const COMPENSATE_CHILD_FULL = new Set([
+  'spine',
+  'chest',
+  'upperChest',
+  'neck',
+  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
+  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+]);
+
+// Every bone a proportion slider can scale.
+const EDITABLE_BONES = [
+  'head', 'neck', 'chest', 'upperChest', 'spine', 'hips',
+  'leftShoulder', 'rightShoulder',
+  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
+  'leftHand', 'rightHand',
+  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+  'leftFoot', 'rightFoot',
+];
+
+interface NodeRest {
+  pos: [number, number, number];
+  scale: [number, number, number];
+}
+const NODE_REST = new WeakMap<Object3D, NodeRest>();
+
+/** Original (file) transform of a node — captured the first time anything touches it. */
+function nodeRest(node: Object3D): NodeRest {
+  let rest = NODE_REST.get(node);
+  if (!rest) {
+    rest = {
+      pos: [node.position.x, node.position.y, node.position.z],
+      scale: [node.scale.x, node.scale.y, node.scale.z],
+    };
+    NODE_REST.set(node, rest);
+  }
+  return rest;
+}
+
+function rawBoneNode(vrm: VRM, bone: string): Object3D | null {
+  return (vrm.humanoid?.getRawBoneNode(bone as never) as Object3D | undefined) ?? null;
+}
+
+/**
+ * Apply the full boneScale edit map to the model. Resets every editable bone
+ * (and the children that compensation touches) to the file's rest transform
+ * first, then applies each factor parents-first on top of current values — so
+ * the result is idempotent, and adjacent segments compose cleanly (a ×1.2
+ * upper arm and ×1.3 forearm give a ×1.3 forearm, never ×1.56).
+ */
+export function applyAllBoneScales(vrm: VRM, boneScale: Record<string, number>): void {
+  if (!vrm.humanoid) return;
+
+  // 1) restore file rest for editable bones and the children compensation touches
+  for (const bone of EDITABLE_BONES) {
+    const node = rawBoneNode(vrm, bone);
+    if (!node) continue;
+    const rest = nodeRest(node);
+    node.position.set(rest.pos[0], rest.pos[1], rest.pos[2]);
+    node.scale.set(rest.scale[0], rest.scale[1], rest.scale[2]);
+    for (const child of node.children) {
+      const cr = nodeRest(child);
+      child.position.set(cr.pos[0], cr.pos[1], cr.pos[2]);
+      child.scale.set(cr.scale[0], cr.scale[1], cr.scale[2]);
+    }
+  }
+
+  // 2) apply edited factors, parents before children (BONE_ORDER is depth-first)
+  for (const bone of BONE_ORDER) {
+    const factor = boneScale[bone];
+    if (factor == null || Math.abs(factor - 1) < 0.005) continue;
+    const node = rawBoneNode(vrm, bone);
+    if (!node) continue;
+    node.scale.multiplyScalar(factor);
+    const full = COMPENSATE_CHILD_FULL.has(bone);
+    if (full || COMPENSATE_CHILD_SCALE.has(bone)) {
+      for (const child of node.children) {
+        child.scale.divideScalar(factor);
+        if (full) child.position.divideScalar(factor);
+      }
+    }
+  }
+}
+
+export function restBoneScale(vrm: VRM, bone: string): [number, number, number] {
+  const node = rawBoneNode(vrm, bone);
+  return node ? nodeRest(node).scale : [1, 1, 1];
+}
+
+export function boneHasNode(vrm: VRM, bone: string): boolean {
+  return rawBoneNode(vrm, bone) != null;
+}
+
+// --- All-in-one ---
+
+/** Apply every recorded edit to the live model (used after edits load or reset). */
+export function applyAllEdits(vrm: VRM, edits: ModelEdits): void {
+  applyAssetVisibilityAll(vrm, edits.hiddenMeshes, edits.hiddenParts);
+  for (const [name, edit] of Object.entries(edits.materials)) {
+    applyMaterialEdit(vrm, name, edit);
+  }
+  const manager = vrm.expressionManager;
+  if (manager) {
+    manager.resetValues();
+    for (const [name, weight] of Object.entries(edits.expressions)) {
+      manager.setValue(name, weight);
+    }
+  }
+  applyAllBoneScales(vrm, edits.boneScale);
+}
