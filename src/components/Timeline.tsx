@@ -50,29 +50,40 @@ const TrackRow = memo(function TrackRow({
   pps,
   width,
   selectedId,
+  keySelSet,
   labelSelected,
   onScrubDown,
   onScrubMove,
+  onScrubUp,
   onDiamondDown,
   onDiamondMove,
   onDiamondUp,
   onDiamondDelete,
   onLabelClick,
   onLabelContext,
+  onSpanDown,
+  onSpanMove,
+  onSpanUp,
 }: {
   row: RowInfo;
   pps: number;
   width: number;
   selectedId: number | null;
+  /** Multi-key selection (marquee / column), as "track:id" strings. */
+  keySelSet: Set<string>;
   labelSelected: boolean;
   onScrubDown: (e: React.PointerEvent) => void;
   onScrubMove: (e: React.PointerEvent) => void;
+  onScrubUp: (e: React.PointerEvent) => void;
   onDiamondDown: (e: React.PointerEvent, track: string, id: number, isHipsPos: boolean) => void;
   onDiamondMove: (e: React.PointerEvent) => void;
   onDiamondUp: () => void;
   onDiamondDelete: (track: string, id: number) => void;
   onLabelClick: (e: React.MouseEvent, track: string) => void;
   onLabelContext: (e: React.MouseEvent, track: string) => void;
+  onSpanDown: (e: React.PointerEvent, track: string, isHipsPos: boolean) => void;
+  onSpanMove: (e: React.PointerEvent) => void;
+  onSpanUp: () => void;
 }) {
   const { keys, passive } = row;
 
@@ -110,10 +121,10 @@ const TrackRow = memo(function TrackRow({
         className={`tl-label${passive ? '' : ' clickable'}${labelSelected && !passive ? ' selected' : ''}`}
         title={
           passive
-            ? `All ${keys.length} keys across every track — click the lane to scrub`
+            ? `All ${keys.length} keys across every track — click the lane to scrub · Alt+drag: box-select keys`
             : dense
-              ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range · Right-click: remove all its keys`
-              : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range · Right-click: remove all its keys`
+              ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag the track's bar: move it in time (selected tracks move together)\nAlt+drag the lane: box-select keys in a time range\nRight-click: remove all its keys`
+              : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag the track's bar: move it in time (selected tracks move together)\nAlt+drag the lane: box-select keys in a time range\nRight-click: remove all its keys`
         }
         onClick={passive ? undefined : (e) => onLabelClick(e, row.track)}
         onContextMenu={passive ? undefined : (e) => onLabelContext(e, row.track)}
@@ -126,19 +137,37 @@ const TrackRow = memo(function TrackRow({
         style={{ width }}
         onPointerDown={onScrubDown}
         onPointerMove={onScrubMove}
+        onPointerUp={onScrubUp}
         onContextMenu={(e) => e.preventDefault()}
       >
         <div className="lane" />
-        {spanW >= 3 && <div className="span" style={{ left: x0 + 3, width: spanW - 6 }} />}
+        {spanW >= 3 && (
+          <div
+            className={`span${passive ? '' : ' grab'}${!passive && labelSelected ? ' sel' : ''}`}
+            style={{ left: x0 + 3, width: spanW - 6 }}
+            title={
+              passive
+                ? undefined
+                : `${row.label} — drag the bar to move the whole track in time${
+                    labelSelected ? ' (moves every selected track together)' : ''
+                  }`
+            }
+            onPointerDown={passive ? undefined : (e) => onSpanDown(e, row.track, row.isHipsPos)}
+            onPointerMove={passive ? undefined : onSpanMove}
+            onPointerUp={passive ? undefined : onSpanUp}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+        )}
         {shown.map((k, i) => {
-          const selected = !passive && selectedId === k.id;
+          const selected =
+            !passive && (selectedId === k.id || keySelSet.has(`${row.track}:${k.id}`));
           const easeClass = k.ease && k.ease !== 'linear' ? ` ease-${k.ease}` : '';
           return (
             <div
               key={passive ? i : k.id}
               className={`diamond${passive ? ' ghost' : ''}${easeClass}${selected ? ' selected' : ''}`}
               style={{ left: k.t * pps }}
-              title={`${k.t.toFixed(2)}s${dense ? ` · 1 of ${keys.length} keys` : k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — drag to move, right-click to delete'}`}
+              title={`${k.t.toFixed(2)}s${dense ? ` · 1 of ${keys.length} keys` : k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — Alt+click: select all keys at this time · Ctrl/Cmd+click: add to selection · drag to move · right-click: delete'}`}
               onPointerDown={passive ? undefined : (e) => onDiamondDown(e, row.track, k.id, row.isHipsPos)}
               onPointerMove={passive ? undefined : onDiamondMove}
               onPointerUp={passive ? undefined : onDiamondUp}
@@ -169,6 +198,7 @@ export function Timeline() {
   const rotTracks = useEditor((s) => s.rotTracks);
   const hipsTrack = useEditor((s) => s.hipsTrack);
   const selectedKey = useEditor((s) => s.selectedKey);
+  const selectedKeys = useEditor((s) => s.selectedKeys);
   const selectedBones = useEditor((s) => s.selectedBones);
   const timelineH = useEditor((s) => s.timelineH);
   const st = useEditor;
@@ -242,6 +272,14 @@ export function Timeline() {
 
   const contentW = duration * pps;
 
+  // Keys highlighted by the multi-key selection (marquee / Alt+click column),
+  // as "track:id" for O(1) membership in the row render.
+  const keySelSet = useMemo(() => new Set(selectedKeys.map((r) => `${r.track}:${r.id}`)), [selectedKeys]);
+
+  // Alt+drag box selection: the time window being swept over the rows.
+  const [marquee, setMarquee] = useState<{ t0: number; t1: number } | null>(null);
+  const marqueeRef = useRef<{ t0: number; t1: number } | null>(null);
+
   // Keep the playhead visible during playback.
   useEffect(() => {
     if (!playing || !scrollRef.current) return;
@@ -288,32 +326,95 @@ export function Timeline() {
   }, []);
 
   // Scrub: pointerdown anywhere on a track background / ruler / playhead cap.
+  // With Alt held it becomes a box selection: sweep a time window across all
+  // tracks and every key inside it gets selected (a plain Alt+click selects
+  // the keys around that instant — "all motion at 0.8s").
   const onScrubDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const s = st.getState();
     s.setPlaying(false);
+    if (e.altKey) {
+      e.preventDefault();
+      const t = timeFromEvent(e.clientX);
+      marqueeRef.current = { t0: t, t1: t };
+      setMarquee({ t0: t, t1: t });
+      return;
+    }
     s.setTime(s.snapTime(timeFromEvent(e.clientX)));
   }, [st, timeFromEvent]);
   const onScrubMove = useCallback((e: React.PointerEvent) => {
     if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
+    if (marqueeRef.current) {
+      const band = { t0: marqueeRef.current.t0, t1: timeFromEvent(e.clientX) };
+      marqueeRef.current = band;
+      setMarquee(band);
+      return;
+    }
     const s = st.getState();
     s.setTime(s.snapTime(timeFromEvent(e.clientX)));
   }, [st, timeFromEvent]);
+  const onScrubUp = useCallback(() => {
+    const band = marqueeRef.current;
+    if (!band) return;
+    marqueeRef.current = null;
+    setMarquee(null);
+    st.getState().selectKeysInRange(band.t0, band.t1);
+  }, [st]);
 
-  // Drag a keyframe diamond.
-  const dragRef = useRef<{ track: string; id: number } | null>(null);
+  // Drag a keyframe diamond. Grab order of precedence:
+  //   Alt+click        → select the whole column of keys at that time, and
+  //                      continue dragging to move the column.
+  //   Ctrl/Cmd+click   → toggle this key in the multi-key selection (no drag).
+  //   key in selection → move every selected key together.
+  //   track selected   → shift every selected track (bar-drag equivalent).
+  //   otherwise        → move just this key.
+  const dragRef = useRef<
+    | { kind: 'key'; track: string; id: number }
+    | { kind: 'keys'; t0: number }
+    | { kind: 'tracks'; tracks: string[]; t0: number }
+    | null
+  >(null);
   const onDiamondDown = useCallback(
     (e: React.PointerEvent, track: string, id: number, isHipsPos: boolean) => {
       e.stopPropagation();
       if (e.button === 2) return;
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      dragRef.current = { track, id };
       const s = st.getState();
       s.setPlaying(false);
-      s.pushHistory();
-      s.selectKey(track, id);
-      if (!isHipsPos) s.selectBone(track === HIPS_TRACK_ID ? 'hips' : track);
+      const bone = track === HIPS_TRACK_ID ? 'hips' : track;
+      const keys = track === HIPS_TRACK_ID ? s.hipsTrack : s.rotTracks[track];
+      const key = keys?.find((k) => k.id === id);
+      const t0 = s.snapTime(key?.t ?? s.time);
+      const inKeySel = s.selectedKeys.length > 1 && s.selectedKeys.some((r) => r.track === track && r.id === id);
+      if (e.altKey && key) {
+        // Select all keys at this key's time across every track (windowed on
+        // the key's own time so off-grid keys always catch themselves); the
+        // drag continues as a column move.
+        s.pushHistory();
+        s.selectKeysInRange(key.t, key.t);
+        dragRef.current = { kind: 'keys', t0 };
+      } else if (e.altKey) {
+        dragRef.current = null;
+      } else if (e.ctrlKey || e.metaKey) {
+        s.toggleKeySelection(track, id);
+        dragRef.current = null;
+      } else if (inKeySel) {
+        s.pushHistory();
+        dragRef.current = { kind: 'keys', t0 };
+      } else {
+        const tracks =
+          s.selectedBones.length > 1 && s.selectedBones.includes(bone)
+            ? s.selectedBones.flatMap((b) => (b === 'hips' ? ['hips', HIPS_TRACK_ID] : [b]))
+            : null;
+        s.pushHistory();
+        s.selectKey(track, id);
+        // Grabbing a selected track keeps the multi-selection (so the drag
+        // moves every highlighted row); otherwise this bone becomes the
+        // selection, like a label click.
+        if (!isHipsPos && !tracks) s.selectBone(bone);
+        dragRef.current = tracks ? { kind: 'tracks', tracks, t0 } : { kind: 'key', track, id };
+      }
     },
     [st],
   );
@@ -321,7 +422,14 @@ export function Timeline() {
     (e: React.PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
-      st.getState().moveKey(drag.track, drag.id, timeFromEvent(e.clientX));
+      const s = st.getState();
+      if (drag.kind === 'keys') {
+        s.moveSelectedKeys(s.snapTime(timeFromEvent(e.clientX)) - drag.t0);
+      } else if (drag.kind === 'tracks') {
+        s.moveTracks(drag.tracks, s.snapTime(timeFromEvent(e.clientX)) - drag.t0);
+      } else {
+        s.moveKey(drag.track, drag.id, timeFromEvent(e.clientX));
+      }
     },
     [st, timeFromEvent],
   );
@@ -356,6 +464,52 @@ export function Timeline() {
     },
     [st],
   );
+
+  // Drag a whole track by its span bar (the bar between its first and last
+  // key). Grabbing a track that is part of a multi-selection keeps the
+  // selection and moves every highlighted track together; otherwise the grab
+  // selects the track first (same modifiers as the label click).
+  const spanDragRef = useRef<{ anchorT: number; tracks: string[] } | null>(null);
+  const onSpanDown = useCallback(
+    (e: React.PointerEvent, track: string, isHipsPos: boolean) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      const s = st.getState();
+      s.setPlaying(false);
+      const bone = isHipsPos || track === HIPS_TRACK_ID ? 'hips' : track;
+      const inMulti = s.selectedBones.length > 1 && s.selectedBones.includes(bone);
+      if (!inMulti) {
+        if (e.shiftKey) s.selectBoneRange(bone);
+        else if (e.ctrlKey || e.metaKey) s.toggleBoneSelection(bone);
+        else s.selectBone(bone);
+      }
+      // Every highlighted row moves with the drag; the hips bone carries both
+      // its rotation track and its position track.
+      const tracks = st
+        .getState()
+        .selectedBones.flatMap((b) => (b === 'hips' ? ['hips', HIPS_TRACK_ID] : [b]));
+      spanDragRef.current = { anchorT: timeFromEvent(e.clientX), tracks };
+      st.getState().pushHistory();
+    },
+    [st, timeFromEvent],
+  );
+  const onSpanMove = useCallback(
+    (e: React.PointerEvent) => {
+      const drag = spanDragRef.current;
+      if (!drag) return;
+      const s = st.getState();
+      const rawDt = timeFromEvent(e.clientX) - drag.anchorT;
+      // Snap the shift (not the key times) so a track keeps its shape and
+      // moves in whole snap steps.
+      const dt = s.snap > 0 ? Math.round(rawDt / s.snap) * s.snap : rawDt;
+      s.moveTracks(drag.tracks, dt);
+    },
+    [st, timeFromEvent],
+  );
+  const onSpanUp = useCallback(() => {
+    spanDragRef.current = null;
+  }, []);
 
   const rulerTicks = useMemo(() => {
     const step = snap > 0 ? snap : pps >= 180 ? 0.1 : pps >= 90 ? 0.25 : pps >= 45 ? 0.5 : 1;
@@ -511,6 +665,7 @@ export function Timeline() {
               style={{ width: contentW }}
               onPointerDown={onScrubDown}
               onPointerMove={onScrubMove}
+              onPointerUp={onScrubUp}
             >
               {rulerTicks.map((tick, i) => (
                 <div key={i} className={`tick ${tick.label ? 'major' : ''}`} style={{ left: tick.t * pps }}>
@@ -528,15 +683,20 @@ export function Timeline() {
               pps={pps}
               width={contentW}
               selectedId={null}
+              keySelSet={keySelSet}
               labelSelected={false}
               onScrubDown={onScrubDown}
               onScrubMove={onScrubMove}
+              onScrubUp={onScrubUp}
               onDiamondDown={onDiamondDown}
               onDiamondMove={onDiamondMove}
               onDiamondUp={onDiamondUp}
               onDiamondDelete={onDiamondDelete}
               onLabelClick={onLabelClick}
               onLabelContext={onLabelContext}
+              onSpanDown={onSpanDown}
+              onSpanMove={onSpanMove}
+              onSpanUp={onSpanUp}
             />
           )}
           {rows.map((row) => (
@@ -546,6 +706,7 @@ export function Timeline() {
               pps={pps}
               width={contentW}
               selectedId={selectedKey?.track === row.track ? selectedKey.id : null}
+              keySelSet={keySelSet}
               labelSelected={
                 row.track === HIPS_TRACK_ID
                   ? selectedBones.includes('hips')
@@ -553,12 +714,16 @@ export function Timeline() {
               }
               onScrubDown={onScrubDown}
               onScrubMove={onScrubMove}
+              onScrubUp={onScrubUp}
               onDiamondDown={onDiamondDown}
               onDiamondMove={onDiamondMove}
               onDiamondUp={onDiamondUp}
               onDiamondDelete={onDiamondDelete}
               onLabelClick={onLabelClick}
               onLabelContext={onLabelContext}
+              onSpanDown={onSpanDown}
+              onSpanMove={onSpanMove}
+              onSpanUp={onSpanUp}
             />
           ))}
 
@@ -568,6 +733,17 @@ export function Timeline() {
             </div>
           )}
 
+          {/* Alt+drag box-selection band */}
+          {marquee && (
+            <div
+              className="tl-marquee"
+              style={{
+                left: LABEL_W + Math.min(marquee.t0, marquee.t1) * pps,
+                width: Math.abs(marquee.t1 - marquee.t0) * pps,
+              }}
+            />
+          )}
+
           {/* playhead */}
           <div className="playhead" style={{ left: LABEL_W + time * pps }}>
             <div
@@ -575,6 +751,7 @@ export function Timeline() {
               title="Drag to scrub"
               onPointerDown={onScrubDown}
               onPointerMove={onScrubMove}
+              onPointerUp={onScrubUp}
               onContextMenu={(e) => e.preventDefault()}
             />
           </div>

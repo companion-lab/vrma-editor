@@ -44,7 +44,7 @@ export function sampleQuaternion(keys: RotKey[], t: number, out: Quaternion): Qu
   const a = keys[i - 1];
   const b = keys[i];
   const span = b.t - a.t;
-  const alpha = span > 1e-9 ? easeAlpha(a.ease, (t - a.t) / span) : 0;
+  const alpha = span > 1e-9 ? easeAlpha(a.ease, (t - a.t) / span, a.bez) : 0;
   return setFromQuat(out, a.q).slerp(setFromQuat(TMP_Q, b.q), alpha);
 }
 
@@ -67,7 +67,7 @@ export function sampleVec3(keys: PosKey[], t: number, out: Vector3): Vector3 {
   const a = keys[i - 1];
   const b = keys[i];
   const span = b.t - a.t;
-  const alpha = span > 1e-9 ? easeAlpha(a.ease, (t - a.t) / span) : 0;
+  const alpha = span > 1e-9 ? easeAlpha(a.ease, (t - a.t) / span, a.bez) : 0;
   out.set(a.p[0], a.p[1], a.p[2]);
   out.lerp(TMP_V2.set(b.p[0], b.p[1], b.p[2]), alpha);
   return out;

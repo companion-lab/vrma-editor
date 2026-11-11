@@ -2,9 +2,13 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { useEditor } from './store';
 import { manipulatedBones, sampleVec3, applyPose } from './lib/animation';
+import { startAiBridge } from './lib/ai/bridge';
 import './styles.css';
 
 createRoot(document.getElementById('root')!).render(<App />);
+
+// MCP bridge (dev only): lets mcp/server.mjs drive this editor tab.
+startAiBridge();
 
 // Dev/test hooks
 if (typeof window !== 'undefined') {

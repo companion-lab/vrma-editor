@@ -1,0 +1,233 @@
+// The in-app AI agent: drives the editor via tool calls. One run() call sends
+// the conversation to the LLM, executes every requested tool against the
+// editor (executeTool), feeds results back and loops until the model answers
+// in plain text. Events stream to the chat UI.
+
+import { executeTool, type ToolResult } from './execute';
+import { chatCompletion, loadSettings, type ContentPart, type WireMessage } from './provider';
+import { useEditor } from '../../store';
+
+const MAX_ITERATIONS = 30;
+/** Tool results longer than this are truncated before they go back in history. */
+const MAX_TOOL_CHARS = 24000;
+/** Screenshot data URLs are dropped from older history (the image was seen once). */
+const KEEP_IMAGE_TURNS = 3;
+
+export interface ToolEvent {
+  kind: 'tool';
+  name: string;
+  args: Record<string, unknown>;
+  result: ToolResult;
+  /** dataUrl when the tool produced a screenshot (for inline display). */
+  image?: string;
+}
+
+export type AgentEvent =
+  | { kind: 'assistant'; text: string }
+  | ToolEvent
+  | { kind: 'error'; message: string }
+  | { kind: 'done'; text: string };
+
+function trunc(text: string, max = MAX_TOOL_CHARS): string {
+  return text.length > max ? `${text.slice(0, max)}… [truncated ${text.length - max} chars]` : text;
+}
+
+// --- System prompt ---
+
+function editorSnapshot(): string {
+  const st = useEditor.getState();
+  const keyed = Object.entries(st.rotTracks)
+    .filter(([, k]) => k?.length)
+    .map(([b, k]) => `${b}(${k!.length})`)
+    .join(', ');
+  return [
+    `- Model: ${st.vrm ? `${st.modelName} (loaded, ${Object.keys(st.vrm.humanoid?.humanBones ?? {}).length} bones, restHipsY ${st.restHipsPos.y.toFixed(3)})` : 'none loaded — call load_model or ask the user'}`,
+    `- Animation: "${st.animName}", duration ${st.duration.toFixed(2)}s, playhead ${st.time.toFixed(2)}s, restHipsY ${st.animRestHipsY.toFixed(3)}`,
+    `- Keyed tracks: ${keyed || 'none'}; hips position keys: ${st.hipsTrack.length}`,
+    `- Transport: ${st.playing ? 'playing' : 'paused'}, loop ${st.loop ? 'on' : 'off'}, autoKey ${st.autoKey ? 'on' : 'off'}, snap ${st.snap ? `${st.snap.toFixed(4)}s` : 'off'}`,
+  ].join('\n');
+}
+
+const SYSTEM_PROMPT = () => [
+  'You are the AI assistant embedded in a VRM animation editor (a browser app). You are an AUTONOMOUS AGENT: the user gives a goal, you carry it out with tools, and you keep going until the goal is fully done. The user watches the viewport live, so every tool call is immediately visible.',
+  '',
+  '## Non-negotiable working rules',
+  '- Finish the WHOLE request in this turn. Chain as many tool calls as needed, back to back.',
+  '- NEVER stop after a preparatory step (loading a model, listing bones, checking state) to ask "what next?" — the user\'s original request already tells you what to do. Loading the model is never the goal; it is step one. After it succeeds, immediately continue with the actual work (creating the animation / editing the model).',
+  '- Never ask for permission or confirmation. Do not end with a question like "let me know what you\'d like to do next" while the request is still unfulfilled.',
+  '- After every tool result, re-read the user\'s request: if it is not yet fulfilled, make the next tool call right away.',
+  '- Only finish with plain text when the whole request is done (or truly impossible), and then summarize briefly: what you did, what to check, anything you could not do.',
+  '',
+  '## How to author animations',
+  '- For a new animation prefer ONE set_animation call with sparse keys (2-6 per bone) and ease curves ("out" for snappy attack, "inout" for smooth). One set_animation beats dozens of add_rotation_key calls.',
+  '- Rotations are relative to T-pose (identity). In set_animation, q quaternions are [x,y,z,w] in canonical space; or build keys with add_rotation_key using euler degrees [x,y,z] (YXZ). Left/right limbs mirror X/Z signs.',
+  '- Hips motion: add_hips_key with an offset in meters from the standing rest pose ([0,-0.2,0] ≈ crouch 20cm).',
+  '- After creating or changing an animation: set_transport { time: 0, playing: true } and use screenshot to visually check a pose or two; iterate if the pose looks wrong (flip signs if a limb bends the wrong way).',
+  '- If no model is loaded, call list_models + load_model first, then CONTINUE with the request.',
+  '- If the right model is already loaded, skip load_model entirely.',
+  '',
+  '## Recipe: a wave (verified against the spec reference implementation — adapt freely)',
+  'set_animation with: duration 2.4, restHipsY = the model restHipsY from get_state, rotTracks {',
+  '  rightUpperArm: t=0 q=[0,0,0,1] → t=0.6 q=[0,0,-0.6088,0.7934] ease "out" → t=2.4 hold — this RAISES the right arm sideways-up;',
+  '  rightLowerArm: forearm wave, alternating q=[0,0,0,1] ↔ q=[0,0.4617,0,0.8870] (±55° about Y) every ~0.4s with ease "inout";',
+  '  head (optional): idle sway qz(-10°) ↔ qz(+10°); spine (optional): slight twist qy(-8°) ↔ qy(+8°)',
+  '} — then set_transport { time: 0, playing: true } and screenshot to verify.',
+  '',
+  '## Rotation cheat sheet (euler degrees, YXZ, T-pose = identity — signs VERIFIED)',
+  '- Frame: the model faces the default camera. Its RIGHT side appears on the LEFT of the screen. +X = screen right (the model\'s left), +Y = up, +Z = toward the camera.',
+  '- Z rotation swings limbs within the screen plane. Raise the RIGHT arm: rightUpperArm [0,0,-75]. Raise the LEFT arm: leftUpperArm [0,0,75]. (Right/left limbs mirror: flip the X and Z signs.)',
+  '- X rotation tilts forward/back: head [10,0,0] nods down, head [-10,0,0] looks up; rightUpperLeg [-30,0,0] raises the right knee forward.',
+  '- Y rotation turns/twists horizontally: head [0,20,0] turns the head toward the model\'s left (screen right); spine [0,-15,0] twists toward the model\'s right.',
+  '- Legs sideways (out from the body): rightUpperLeg [0,0,-20], leftUpperLeg [0,0,20].',
+  '- Forearm bend with the arm hanging down: rightLowerArm [0,55,0] swings the right forearm forward.',
+  '- If a pose looks mirrored/wrong in the screenshot, flip the sign of the axis you used — but these base signs are verified, so check your bone choice first.',
+  '',
+  '## Current editor state',
+  editorSnapshot(),
+].join('\n');
+
+// --- Run loop ---
+
+export interface AgentRun {
+  /** Mutable conversation (wire format). Keep it and pass it back to run again. */
+  messages: WireMessage[];
+}
+
+export interface AgentRunHandle {
+  promise: Promise<string>;
+  cancel: () => void;
+}
+
+/** Execute one agent turn (user message → final text). */
+export function runAgent(
+  conversation: WireMessage[],
+  userText: string,
+  onEvent: (e: AgentEvent) => void,
+): AgentRunHandle {
+  const controller = new AbortController();
+  const messages = conversation;
+
+  const promise = (async (): Promise<string> => {
+    // Refresh the system prompt (fresh snapshot) and append the user message.
+    const sys = messages.find((m) => m.role === 'system') as Extract<WireMessage, { role: 'system' }> | undefined;
+    const prompt = SYSTEM_PROMPT();
+    if (sys) sys.content = prompt;
+    else messages.unshift({ role: 'system', content: prompt });
+    messages.push({ role: 'user', content: userText });
+
+    try {
+      let madeToolCalls = false;
+      let nudges = 0;
+      for (let i = 0; i < MAX_ITERATIONS; i++) {
+        if (controller.signal.aborted) throw new Error('Stopped');
+        pruneHistory(messages);
+
+        const assistant = await chatCompletion(messages, { signal: controller.signal });
+        messages.push({ role: 'assistant', content: assistant.content ?? '', tool_calls: assistant.tool_calls });
+
+        if (assistant.content) onEvent({ kind: 'assistant', text: assistant.content });
+
+        const calls = assistant.tool_calls ?? [];
+        if (calls.length === 0) {
+          // Stop-and-ask mid-task? Nudge the model to continue (bounded).
+          const text = assistant.content ?? '';
+          if (madeToolCalls && nudges < MAX_NUDGES_PER_RUN && STOP_ASK_RE.test(text)) {
+            nudges++;
+            messages.push({ role: 'user', content: CONTINUE_NUDGE });
+            continue;
+          }
+          onEvent({ kind: 'done', text });
+          return text;
+        }
+        madeToolCalls = true;
+
+        const images: string[] = [];
+        for (const call of calls) {
+          if (controller.signal.aborted) throw new Error('Stopped');
+          let args: Record<string, unknown> = {};
+          let parseError: string | null = null;
+          try {
+            args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+          } catch {
+            parseError = 'Malformed tool arguments (invalid JSON)';
+          }
+          const result: ToolResult = parseError
+            ? { ok: false, error: parseError }
+            : await executeTool(call.function.name, args);
+
+          let image: string | undefined;
+          if (result.ok && result.result && typeof result.result === 'object' && 'dataUrl' in (result.result as object)) {
+            const r = result.result as { dataUrl?: string };
+            image = r.dataUrl;
+          }
+          images.push(...collectImages(result));
+          onEvent({ kind: 'tool', name: call.function.name, args, result, image });
+
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: trunc(JSON.stringify(result.ok ? result.result : { error: result.error })),
+          });
+        }
+
+        // Feed screenshots back as vision input (one user message after the
+        // tool results keep the required assistant→tool sequence intact).
+        const s = loadSettings();
+        if (s.sendScreenshots && images.length > 0 && !controller.signal.aborted) {
+          const parts: ContentPart[] = [
+            { type: 'text', text: '[viewport screenshot(s) after your last tool calls — inspect them]' },
+            ...images.slice(0, 2).map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+          ];
+          messages.push({ role: 'user', content: parts });
+        }
+      }
+      const msg = `Stopped after ${MAX_ITERATIONS} tool rounds.`;
+      onEvent({ kind: 'error', message: msg });
+      return msg;
+    } catch (err) {
+      const message =
+        (err as Error).name === 'AbortError' ? 'Stopped by user' : ((err as Error)?.message ?? String(err));
+      onEvent({ kind: 'error', message });
+      return message;
+    }
+  })();
+
+  return { promise, cancel: () => controller.abort() };
+}
+
+/**
+ * Some models stop mid-task to hand control back ("…let me know what you'd
+ * like to do next"). When that happens after this run already made tool
+ * calls, we push a continuation nudge and let the loop run again (bounded —
+ * a model that refuses to continue can't spin forever).
+ */
+const STOP_ASK_RE =
+  /let me know|what (would|do) you (like|want)|would you like|want me to|shall i |should i |i can help you/i;
+const MAX_NUDGES_PER_RUN = 2;
+const CONTINUE_NUDGE =
+  'Continue autonomously. The request above is still not fulfilled — do not wait for the user and do not ask ' +
+  'questions. Make the next tool calls right now and finish the whole task, then give the final summary.';
+
+function collectImages(result: ToolResult): string[] {
+  if (!result.ok || typeof result.result !== 'object' || result.result == null) return [];
+  const dataUrl = (result.result as { dataUrl?: unknown }).dataUrl;
+  return typeof dataUrl === 'string' ? [dataUrl] : [];
+}
+
+/**
+ * Keep the wire history bounded: drop screenshot images from older turns and
+ * shrink very old tool results (the model has already consumed them).
+ */
+function pruneHistory(messages: WireMessage[]): void {
+  let imageBudget = KEEP_IMAGE_TURNS;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'user' && Array.isArray(m.content)) {
+      if (imageBudget <= 0) {
+        messages[i] = { role: 'user', content: '[earlier viewport screenshot removed from history]' };
+      } else {
+        imageBudget--;
+      }
+    }
+  }
+}

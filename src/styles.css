@@ -771,6 +771,28 @@ input[type='range']::-moz-range-thumb {
   background: linear-gradient(90deg, rgba(110, 168, 254, 0.22), rgba(110, 168, 254, 0.42));
 }
 
+/* the bar drags the whole track in time */
+.span.grab {
+  cursor: grab;
+}
+
+/* selected track: the bar reads as "this moves when you drag it" */
+.tl-row.sel:not(.ruler-row) .span {
+  background: linear-gradient(90deg, rgba(110, 168, 254, 0.55), rgba(110, 168, 254, 0.9));
+}
+
+/* Alt+drag box-selection band over the rows */
+.tl-marquee {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  background: rgba(110, 168, 254, 0.13);
+  border-left: 1px solid rgba(110, 168, 254, 0.75);
+  border-right: 1px solid rgba(110, 168, 254, 0.75);
+  pointer-events: none;
+}
+
 .tick {
   position: absolute;
   top: 16px;
@@ -843,6 +865,30 @@ input[type='range']::-moz-range-thumb {
 .diamond.ease-inout.selected,
 .diamond.ease-step.selected {
   outline: 2px solid rgba(110, 168, 254, 0.6);
+}
+
+.diamond.ease-custom {
+  background: #f472b6;
+}
+
+.diamond.ease-custom.selected {
+  outline: 2px solid rgba(110, 168, 254, 0.6);
+}
+
+/* custom ease curve editor (Inspector > Transition) */
+.ease-curve {
+  display: block;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.ease-curve-info {
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 .playhead {
@@ -1409,4 +1455,209 @@ input[type='range']::-moz-range-thumb {
   white-space: nowrap;
   max-width: 88px;
   flex: 0 0 auto;
+}
+
+/* ---------- AI assistant panel ---------- */
+.ai-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ai-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 4px;
+}
+
+.ai-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.ai-bridge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+
+.ai-bridge-dot.on {
+  background: var(--ok);
+}
+
+.ai-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-msg {
+  padding: 7px 9px;
+  border-radius: 8px;
+  max-width: 92%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+.ai-msg.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #0d0e13;
+  font-weight: 500;
+}
+
+.ai-msg.assistant {
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.ai-msg.error {
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.ai-msg.thinking {
+  align-self: flex-start;
+  color: var(--muted);
+  font-style: italic;
+  padding: 2px 4px;
+}
+
+.ai-msg.toolrow {
+  align-self: flex-start;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: none;
+  padding: 0;
+  border: none;
+}
+
+.ai-tool {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+  max-width: 100%;
+}
+
+.ai-tool.fail {
+  border-color: var(--danger);
+}
+
+.ai-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--ok);
+  list-style: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ai-tool.fail summary {
+  color: var(--danger);
+}
+
+.ai-tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-tool-name {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.ai-tool-args {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-tool-detail {
+  margin: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--muted);
+}
+
+.ai-shot {
+  max-width: 100%;
+  max-height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  align-self: flex-start;
+}
+
+.ai-input-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  align-items: flex-end;
+  border-top: 1px solid var(--border);
+}
+
+.ai-input-row textarea {
+  flex: 1;
+  resize: none;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.ai-input-row textarea:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+/* --- AI settings dialog --- */
+.ai-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 14, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.ai-settings {
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+}
+
+.ai-settings .ctl-row input[type='checkbox'] {
+  margin-right: 8px;
 }

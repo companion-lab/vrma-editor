@@ -4,8 +4,8 @@
 //  - hips translation (optional, offset from rest position, meters)
 //  - LINEAR interpolation, FLOAT accessors
 
-import type { Ease, PosKey, Quat, RotKey, Vec3, VrmaData } from './parse';
-import { EASE_FUNCS } from './parse';
+import type { Bez, Ease, PosKey, Quat, RotKey, Vec3, VrmaData } from './parse';
+import { easeAlpha } from './parse';
 import { BONE_ORDER_INDEX } from '../humanoid';
 
 const GLB_MAGIC = 0x46546c67;
@@ -54,11 +54,11 @@ function lerpVec3(a: Vec3, b: Vec3, t: number): Vec3 {
 }
 
 // Expand a key list into plain linear keys, resampling non-linear segments
-// (ease-in / ease-out / in-out / step) at BAKE_FPS. A 'step' segment's
-// intermediates all sit at the left key's value, producing a sharp jump.
-function bakeTrack<T>(keys: { t: number; ease?: Ease }[], valueOf: (k: T) => any, lerp: (a: any, b: any, u: number) => any): { t: number; v: any }[] {
+// (ease-in / ease-out / in-out / step / custom bezier) at BAKE_FPS. A 'step'
+// segment's intermediates all sit at the left key's value, producing a sharp jump.
+function bakeTrack<T>(keys: { t: number; ease?: Ease; bez?: Bez }[], valueOf: (k: T) => any, lerp: (a: any, b: any, u: number) => any): { t: number; v: any }[] {
   const out: { t: number; v: any }[] = [];
-  const ks = keys as (T & { t: number; ease?: Ease })[];
+  const ks = keys as (T & { t: number; ease?: Ease; bez?: Bez })[];
   for (let i = 0; i < ks.length; i++) {
     const a = ks[i];
     const b = ks[i + 1];
@@ -67,7 +67,7 @@ function bakeTrack<T>(keys: { t: number; ease?: Ease }[], valueOf: (k: T) => any
     const span = b.t - a.t;
     if (span <= 1e-9) continue;
     const n = Math.max(2, Math.ceil(span * BAKE_FPS));
-    const fn = EASE_FUNCS[a.ease];
+    const fn = (u: number) => easeAlpha(a.ease, u, a.bez);
     for (let k = 1; k < n; k++) {
       const u = k / n;
       out.push({ t: a.t + span * u, v: lerp(valueOf(a), valueOf(b), fn(u)) });

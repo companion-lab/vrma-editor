@@ -3,9 +3,11 @@ import { ChevronRight, Diamond, Eraser, KeyRound, RotateCcw, Undo2, Wand2 } from
 import { Euler } from 'three';
 import { useEditor, HIPS_TRACK_ID, countModelEdits } from '../store';
 import { getNormNode } from '../lib/animation';
-import { EASES, type Ease } from '../lib/vrma/parse';
+import { EASES, seedBez, type Ease } from '../lib/vrma/parse';
 import { prettyBoneName } from '../lib/humanoid';
 import { ModelPanel } from './ModelPanel';
+import { AIPanel } from './AIPanel';
+import { EaseCurve } from './EaseCurve';
 import { PanelResizeHandle } from './PanelResize';
 
 const EASE_LABELS: Record<Ease, string> = {
@@ -14,6 +16,7 @@ const EASE_LABELS: Record<Ease, string> = {
   out: 'Ease out (fast → slow)',
   inout: 'Ease in-out (smooth)',
   step: 'Step (hold until next key)',
+  custom: 'Custom — drag handles below',
 };
 
 const DEG = 180 / Math.PI;
@@ -178,7 +181,11 @@ function KeyTransition() {
       <select
         className="wide"
         value={ease}
-        onChange={(e) => useEditor.getState().setKeyEase(selectedKey.track, key.id, e.target.value as Ease)}
+        onChange={(e) => {
+          const st = useEditor.getState();
+          const val = e.target.value as Ease;
+          st.setKeyEase(selectedKey.track, key.id, val, val === 'custom' ? seedBez(key.ease) : undefined);
+        }}
       >
         {EASES.map((e) => (
           <option key={e} value={e}>
@@ -186,6 +193,15 @@ function KeyTransition() {
           </option>
         ))}
       </select>
+      {ease === 'custom' && !isLast && (
+        <EaseCurve
+          bez={key.bez}
+          strokeStart={() => useEditor.getState().pushHistory()}
+          onChange={(bez) =>
+            useEditor.getState().setKeyEase(selectedKey.track, key.id, 'custom', bez, { history: false })
+          }
+        />
+      )}
       <div className="muted small" style={{ marginTop: 4 }}>
         {isLast
           ? 'This is the last key of the track — its transition has no next segment to affect.'
@@ -195,7 +211,13 @@ function KeyTransition() {
         <button
           className="btn"
           title="Apply this transition to every key of the track"
-          onClick={() => useEditor.getState().setTrackEase(selectedKey.track, ease)}
+          onClick={() =>
+            useEditor.getState().setTrackEase(
+              selectedKey.track,
+              ease,
+              ease === 'custom' ? (key.bez ?? seedBez(ease)) : undefined,
+            )
+          }
         >
           <Wand2 size={13} /> Apply to track
         </button>
@@ -358,6 +380,12 @@ export function Inspector() {
         >
           Model{editCount > 0 ? ` (${editCount})` : ''}
         </button>
+        <button
+          className={tab === 'ai' ? 'active' : ''}
+          onClick={() => useEditor.getState().setRightTab('ai')}
+        >
+          AI
+        </button>
         <span className="panel-tabs-spacer" />
         <button
           className="title-btn"
@@ -367,7 +395,7 @@ export function Inspector() {
           <ChevronRight size={14} />
         </button>
       </div>
-      {tab === 'pose' ? <PoseInspector /> : <ModelPanel />}
+      {tab === 'pose' ? <PoseInspector /> : tab === 'model' ? <ModelPanel /> : <AIPanel />}
     </div>
   );
 }

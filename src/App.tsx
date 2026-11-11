@@ -55,6 +55,8 @@ export default function App() {
         else st.deleteSelectedKey();
       } else if (e.key === 'Home') {
         st.setTime(0);
+      } else if (e.key === 'Escape') {
+        st.clearKeySelection();
       }
     };
     window.addEventListener('keydown', onKey);

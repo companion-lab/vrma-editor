@@ -187,8 +187,8 @@ function saveUI(ui: UILayout) {
     // ignore quota errors
   }
 }
-import type { Ease, PosKey, Quat, RotKey, VrmaData, Vec3 } from './lib/vrma/parse';
-import { allocKeyId } from './lib/vrma/parse';
+import type { Bez, Ease, PosKey, Quat, RotKey, VrmaData, Vec3 } from './lib/vrma/parse';
+import { allocKeyId, DEFAULT_BEZ } from './lib/vrma/parse';
 import { captureHipsPosition, captureQuat, clearManipulated, manipulatedBones, resetToRestPose } from './lib/animation';
 import { BONE_ORDER, BONE_ORDER_INDEX } from './lib/humanoid';
 
@@ -234,7 +234,7 @@ interface EditorState {
   } | null;
   /** Expression weights already baked into the loaded file's rest pose. */
   modelBakedExpressions: Record<string, number>;
-  rightTab: 'pose' | 'model';
+  rightTab: 'pose' | 'model' | 'ai';
 
   // animation
   animName: string;
@@ -256,6 +256,9 @@ interface EditorState {
    *  (gizmo target) and is always part of it when set. */
   selectedBones: string[];
   selectedKey: { track: TrackId; id: number } | null;
+  /** Multi-key selection (time-range marquee / Alt+click column). selectedKey
+   *  stays the primary; dragging any selected key moves them all together. */
+  selectedKeys: { track: TrackId; id: number }[];
   poseTick: number; // bumped to re-render pose-bound UI while dragging
 
   // misc
@@ -289,7 +292,7 @@ interface EditorState {
   ) => void;
   setModelBakedExpressions: (baked: Record<string, number>) => void;
   clearModelEdits: () => void;
-  setRightTab: (tab: 'pose' | 'model') => void;
+  setRightTab: (tab: 'pose' | 'model' | 'ai') => void;
   setMaterialEdit: (matName: string, patch: MaterialEdit) => void;
   resetMaterialEdit: (matName: string) => void;
   setMeshHidden: (meshName: string, hidden: boolean) => void;
@@ -323,6 +326,14 @@ interface EditorState {
   toggleBoneSelection: (bone: string) => void;
   selectBoneRange: (bone: string) => void;
   selectKey: (track: TrackId, id: number | null) => void;
+  /** Select every key of every track whose time is inside [t0, t1] (a marquee
+   *  band, or one instant for Alt+click on a key — "all motion at 0.8s"). */
+  selectKeysInRange: (t0: number, t1: number) => void;
+  toggleKeySelection: (track: TrackId, id: number) => void;
+  clearKeySelection: () => void;
+  /** Shift all selected keys by dt seconds as one block (spacing preserved,
+   *  clamped so the block stays inside [0, duration]; other keys stay put). */
+  moveSelectedKeys: (dt: number) => void;
 
   beginPoseStroke: () => void;
   manipulateBone: (bone: string, kind?: 'rot' | 'hipsPos' | 'both') => void;
@@ -341,8 +352,12 @@ interface EditorState {
   deleteBoneKeys: (bone: string) => void;
   deleteSelectedBonesKeys: () => void;
   moveKey: (track: TrackId, id: number, t: number) => void;
-  setKeyEase: (track: TrackId, id: number, ease: Ease) => void;
-  setTrackEase: (track: TrackId, ease: Ease) => void;
+  /** Shift every key of the given tracks by dt seconds as one block (multi-
+   *  track move: the whole selection slides together, spacing preserved,
+   *  clamped so no key leaves [0, duration]). */
+  moveTracks: (tracks: TrackId[], dt: number) => void;
+  setKeyEase: (track: TrackId, id: number, ease: Ease, bez?: Bez, opts?: { history?: boolean }) => void;
+  setTrackEase: (track: TrackId, ease: Ease, bez?: Bez, opts?: { history?: boolean }) => void;
 
   getAnimData: () => VrmaData;
   importAnim: (data: VrmaData) => void;
@@ -387,6 +402,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   selectedBone: null,
   selectedBones: [],
   selectedKey: null,
+  selectedKeys: [],
   poseTick: 0,
 
   status: null,
@@ -679,7 +695,93 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return { selectedBones: BONE_ORDER.slice(lo, hi + 1), selectedBone: bone };
     }),
   selectKey: (track, id) =>
-    set({ selectedKey: id == null ? null : { track, id } }),
+    set({
+      selectedKey: id == null ? null : { track, id },
+      selectedKeys: id == null ? [] : [{ track, id }],
+    }),
+
+  // Every key (all tracks, including the hips position track) whose time is
+  // inside the window. A degenerate window (t0 === t1, Alt+click) widens to
+  // the current snap cell so "all motion at 0.8s" grabs the whole column
+  // without catching neighbouring frames.
+  selectKeysInRange: (t0, t1) => {
+    const s = get();
+    const lo = Math.min(t0, t1);
+    const hi = Math.max(t0, t1);
+    const eps = hi - lo > 0 ? (s.snap > 0 ? s.snap / 2 : 0.005) : s.snap > 0 ? s.snap / 3 : 0.005;
+    const refs: { track: TrackId; id: number }[] = [];
+    for (const [bone, keys] of Object.entries(s.rotTracks)) {
+      for (const k of keys ?? []) {
+        if (k.t >= lo - eps && k.t <= hi + eps) refs.push({ track: bone, id: k.id });
+      }
+    }
+    for (const k of s.hipsTrack) {
+      if (k.t >= lo - eps && k.t <= hi + eps) refs.push({ track: HIPS_TRACK_ID, id: k.id });
+    }
+    if (refs.length === 0) {
+      set({ selectedKeys: [], selectedKey: null });
+      get().setStatus('info', 'No keyframes in that time range');
+      return;
+    }
+    set({ selectedKeys: refs, selectedKey: refs[0] });
+    get().setStatus(
+      'ok',
+      `Selected ${refs.length} key${refs.length === 1 ? '' : 's'} — drag any of them to move together`,
+    );
+  },
+
+  toggleKeySelection: (track, id) =>
+    set((s) => {
+      const exists = s.selectedKeys.some((r) => r.track === track && r.id === id);
+      if (exists) {
+        const selectedKeys = s.selectedKeys.filter((r) => !(r.track === track && r.id === id));
+        const wasPrimary = s.selectedKey?.track === track && s.selectedKey?.id === id;
+        return {
+          selectedKeys,
+          selectedKey: wasPrimary ? (selectedKeys[selectedKeys.length - 1] ?? null) : s.selectedKey,
+        };
+      }
+      return { selectedKeys: [...s.selectedKeys, { track, id }], selectedKey: { track, id } };
+    }),
+
+  clearKeySelection: () => set({ selectedKeys: [], selectedKey: null }),
+
+  // Shift every selected key by one shared dt so their relative spacing is
+  // preserved; the block is clamped to the clip and stays sorted per track.
+  moveSelectedKeys: (dt) => {
+    const s = get();
+    const sel = s.selectedKeys;
+    if (sel.length === 0) return;
+    let minT = Infinity;
+    let maxT = -Infinity;
+    for (const r of sel) {
+      const k =
+        r.track === HIPS_TRACK_ID
+          ? s.hipsTrack.find((x) => x.id === r.id)
+          : s.rotTracks[r.track]?.find((x) => x.id === r.id);
+      if (!k) continue;
+      minT = Math.min(minT, k.t);
+      maxT = Math.max(maxT, k.t);
+    }
+    if (!Number.isFinite(minT)) return;
+    const d = Math.min(Math.max(dt, -minT), s.duration - maxT);
+    if (Math.abs(d) < 1e-9) return;
+    const shift = <K extends { id: number; t: number }>(keys: K[], ids: Set<number>): K[] =>
+      keys.map((k) => (ids.has(k.id) ? { ...k, t: k.t + d } : k)).sort((a, b) => a.t - b.t);
+    set((st) => {
+      const hipsIds = new Set(sel.filter((r) => r.track === HIPS_TRACK_ID).map((r) => r.id));
+      const hipsTrack = hipsIds.size > 0 ? shift(st.hipsTrack, hipsIds) : st.hipsTrack;
+      let rotTracks: Partial<Record<string, RotKey[]>> | null = null;
+      for (const [bone, keys] of Object.entries(st.rotTracks)) {
+        if (!keys) continue;
+        const ids = new Set(sel.filter((r) => r.track === bone).map((r) => r.id));
+        if (ids.size === 0) continue;
+        rotTracks = rotTracks ?? { ...st.rotTracks };
+        rotTracks[bone] = shift(keys, ids);
+      }
+      return { hipsTrack, ...(rotTracks ? { rotTracks } : {}) };
+    });
+  },
 
   // Called at the start of a manipulation stroke (gizmo drag, slider drag):
   // snapshots history once so the whole stroke is a single undo step.
@@ -829,6 +931,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return {
         rotTracks: { ...s.rotTracks, [bone]: keys },
         selectedKey: { track: bone, id },
+        selectedKeys: [{ track: bone, id }],
       };
     });
   },
@@ -852,23 +955,56 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return {
         hipsTrack: keys,
         selectedKey: { track: HIPS_TRACK_ID, id },
+        selectedKeys: [{ track: HIPS_TRACK_ID, id }],
       };
     });
   },
 
+  // Del key / trash button. With a multi-key selection (marquee) removes all
+  // of them in one undo step; otherwise just the primary selected key.
   deleteSelectedKey: () => {
-    const sel = get().selectedKey;
+    const s = get();
+    const multi = s.selectedKeys;
+    if (multi.length > 1) {
+      s.pushHistory();
+      set((st) => {
+        const hipsIds = new Set(multi.filter((r) => r.track === HIPS_TRACK_ID).map((r) => r.id));
+        const hipsTrack =
+          hipsIds.size > 0 ? st.hipsTrack.filter((k) => !hipsIds.has(k.id)) : st.hipsTrack;
+        let rotTracks: Partial<Record<string, RotKey[]>> | null = null;
+        for (const [bone, keys] of Object.entries(st.rotTracks)) {
+          if (!keys) continue;
+          const ids = new Set(multi.filter((r) => r.track === bone).map((r) => r.id));
+          if (ids.size === 0) continue;
+          rotTracks = rotTracks ?? { ...st.rotTracks };
+          rotTracks[bone] = keys.filter((k) => !ids.has(k.id));
+        }
+        return {
+          ...(rotTracks ? { rotTracks } : {}),
+          hipsTrack,
+          selectedKeys: [],
+          selectedKey: null,
+        };
+      });
+      return;
+    }
+    const sel = s.selectedKey;
     if (!sel) return;
     get().pushHistory();
-    set((s) => {
+    set((st) => {
       if (sel.track === HIPS_TRACK_ID) {
-        return { hipsTrack: s.hipsTrack.filter((k) => k.id !== sel.id), selectedKey: null };
+        return {
+          hipsTrack: st.hipsTrack.filter((k) => k.id !== sel.id),
+          selectedKey: null,
+          selectedKeys: [],
+        };
       }
-      const keys = s.rotTracks[sel.track];
-      if (!keys) return s;
+      const keys = st.rotTracks[sel.track];
+      if (!keys) return st;
       return {
-        rotTracks: { ...s.rotTracks, [sel.track]: keys.filter((k) => k.id !== sel.id) },
+        rotTracks: { ...st.rotTracks, [sel.track]: keys.filter((k) => k.id !== sel.id) },
         selectedKey: null,
+        selectedKeys: [],
       };
     });
   },
@@ -950,12 +1086,53 @@ export const useEditor = create<EditorState>()((set, get) => ({
     });
   },
 
-  setKeyEase: (track, id, ease) => {
-    get().pushHistory();
+  // Shift whole tracks in time. One shared dt so spacing between the tracks
+  // is preserved; clamped so the outermost keys stay inside the clip.
+  moveTracks: (tracks, dt) => {
+    const s = get();
+    if (tracks.length === 0) return;
+    let minT = Infinity;
+    let maxT = -Infinity;
+    for (const tr of tracks) {
+      const keys = tr === HIPS_TRACK_ID ? s.hipsTrack : s.rotTracks[tr];
+      if (!keys || keys.length === 0) continue;
+      minT = Math.min(minT, keys[0].t);
+      maxT = Math.max(maxT, keys[keys.length - 1].t);
+    }
+    if (!Number.isFinite(minT)) return;
+    const d = Math.min(Math.max(dt, -minT), s.duration - maxT);
+    if (Math.abs(d) < 1e-9) return;
+    const shift = <K extends { t: number }>(keys: K[]): K[] =>
+      keys.map((k) => ({ ...k, t: k.t + d }));
+    set((st) => {
+      let rotTracks: Partial<Record<string, RotKey[]>> | null = null;
+      for (const tr of tracks) {
+        if (tr === HIPS_TRACK_ID) continue;
+        const keys = st.rotTracks[tr];
+        if (!keys || keys.length === 0) continue;
+        rotTracks = rotTracks ?? { ...st.rotTracks };
+        rotTracks[tr] = shift(keys);
+      }
+      const hips =
+        tracks.includes(HIPS_TRACK_ID) && st.hipsTrack.length > 0 ? shift(st.hipsTrack) : null;
+      return {
+        ...(rotTracks ? { rotTracks } : {}),
+        ...(hips ? { hipsTrack: hips } : {}),
+      };
+    });
+  },
+
+  setKeyEase: (track, id, ease, bez, opts) => {
+    if (opts?.history !== false) get().pushHistory();
+    const apply = <T extends { ease?: Ease; bez?: Bez }>(k: T): T => ({
+      ...k,
+      ease,
+      bez: ease === 'custom' ? (bez ?? k.bez ?? DEFAULT_BEZ) : undefined,
+    });
     set((s) => {
       if (track === HIPS_TRACK_ID) {
         return {
-          hipsTrack: s.hipsTrack.map((k) => (k.id === id ? { ...k, ease } : k)),
+          hipsTrack: s.hipsTrack.map((k) => (k.id === id ? apply(k) : k)),
         };
       }
       const keys = s.rotTracks[track];
@@ -963,22 +1140,27 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return {
         rotTracks: {
           ...s.rotTracks,
-          [track]: keys.map((k) => (k.id === id ? { ...k, ease } : k)),
+          [track]: keys.map((k) => (k.id === id ? apply(k) : k)),
         },
       };
     });
   },
 
-  setTrackEase: (track, ease) => {
-    get().pushHistory();
+  setTrackEase: (track, ease, bez, opts) => {
+    if (opts?.history !== false) get().pushHistory();
+    const apply = <T extends { ease?: Ease; bez?: Bez }>(k: T): T => ({
+      ...k,
+      ease,
+      bez: ease === 'custom' ? (bez ?? k.bez ?? DEFAULT_BEZ) : undefined,
+    });
     set((s) => {
       if (track === HIPS_TRACK_ID) {
-        return { hipsTrack: s.hipsTrack.map((k) => ({ ...k, ease })) };
+        return { hipsTrack: s.hipsTrack.map(apply) };
       }
       const keys = s.rotTracks[track];
       if (!keys) return s;
       return {
-        rotTracks: { ...s.rotTracks, [track]: keys.map((k) => ({ ...k, ease })) },
+        rotTracks: { ...s.rotTracks, [track]: keys.map(apply) },
       };
     });
   },
@@ -1006,6 +1188,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       time: 0,
       playing: false,
       selectedKey: null,
+      selectedKeys: [],
     });
   },
 
@@ -1021,6 +1204,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       time: 0,
       playing: false,
       selectedKey: null,
+      selectedKeys: [],
     }));
   },
 }));
@@ -1060,7 +1244,9 @@ export function makeSampleData(): VrmaData {
   const head: RotKey[] = [];
   const spine: RotKey[] = [];
 
-  const RAISE = qz(75); // raise right arm sideways/up
+  // Z- (negative) raises right-side limbs within the screen plane: the right
+  // arm rests along -X, so rotating toward +Y needs a negative Z angle.
+  const RAISE = qz(-75); // raise right arm sideways/up
   const WAVE_A = qz(0, 'y');
   const WAVE_B = qz(55, 'y');
   const HEAD_L = qz(-10);

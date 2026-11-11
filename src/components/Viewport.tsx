@@ -11,6 +11,7 @@ import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
 import { applyAllEdits, collectMaterials, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
 import { registerPartAssociations } from '../lib/vrmedit/parts';
+import { registerViewport } from '../lib/ai/sceneRef';
 
 export function Viewport() {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -84,6 +85,7 @@ export function Viewport() {
 
     const clock = new THREE.Clock();
     sceneRef.current = { scene, camera, renderer, orbit, gizmo, gizmoHelper, vrmRoot, clock, overlay };
+    registerViewport({ renderer, scene, camera }); // for AI tools (screenshot)
     if (import.meta.env.DEV) {
       (window as any).__vp = { scene, camera, renderer, vrmRoot, grid, overlay };
     }

@@ -5,21 +5,76 @@ export type Quat = [number, number, number, number]; // x y z w
 export type Vec3 = [number, number, number];
 
 // Velocity/transition curve from this key toward the NEXT key.
-// 'linear' is the VRMA default; the others are baked to linear keys on export.
-export type Ease = 'linear' | 'in' | 'out' | 'inout' | 'step';
-export const EASES: Ease[] = ['linear', 'in', 'out', 'inout', 'step'];
+// 'linear' is the VRMA default; the others (incl. custom bezier curves) are
+// baked to linear keys on export.
+export type Ease = 'linear' | 'in' | 'out' | 'inout' | 'step' | 'custom';
+export const EASES: Ease[] = ['linear', 'in', 'out', 'inout', 'step', 'custom'];
+
+// Cubic-bezier handles [P1x, P1y, P2x, P2y] for the 'custom' ease — the same
+// shape as CSS cubic-bezier(). X (time) is clamped to 0..1 when editing; Y may
+// leave 0..1 for anticipation (<0) / follow-through (>1) like Blender handles.
+export type Bez = [number, number, number, number];
+export const DEFAULT_BEZ: Bez = [0.42, 0, 0.58, 1];
+// Handles seeded when converting a preset into a custom curve.
+export function seedBez(from: Ease | undefined): Bez {
+  if (from === 'in') return [0.42, 0, 1, 1];
+  if (from === 'out') return [0, 0, 0.58, 1];
+  return DEFAULT_BEZ;
+}
 
 // Velocity/transition curves. `u` is the raw segment progress (0..1);
-// the result is the eased progress used for interpolation.
+// the result is the eased progress used for interpolation. 'custom' is
+// resolved through `bez` in easeAlpha, never through this table.
 export const EASE_FUNCS: Record<Ease, (u: number) => number> = {
   linear: (u) => u,
-  in: (u) => u * u,
-  out: (u) => 1 - (1 - u) * (1 - u),
-  inout: (u) => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u)),
+  in: (u) => u * u, // quad-in
+  out: (u) => 1 - (1 - u) * (1 - u), // quad-out
+  inout: (u) => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u)), // quad-inout
   step: () => 0, // hold this key until the next one
+  custom: (u) => u,
 };
 
-export function easeAlpha(ease: Ease | undefined, u: number): number {
+/** Evaluate the eased value at progress `x` (0..1) for a cubic bezier whose
+ *  endpoints are (0,0)→(1,1) with handles at P1/P2. Solves X(u)=x for the
+ *  curve parameter (Newton-Raphson, bisection fallback), then returns Y. */
+export function evalCubicBezier(bez: Bez, x: number): number {
+  const [x1, y1, x2, y2] = bez;
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  // power-basis coefficients: X(u) = ((ax·u + bx)·u + cx)·u
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sample = (a: number, b: number, c: number, u: number) => ((a * u + b) * u + c) * u;
+  const sx = (u: number) => sample(ax, bx, cx, u);
+  const sy = (v: number) => sample(ay, by, cy, v);
+  const dx = (u: number) => (3 * ax * u + 2 * bx) * u + cx;
+  let u = x;
+  for (let i = 0; i < 8; i++) {
+    const err = sx(u) - x;
+    if (Math.abs(err) < 1e-6) return sy(u);
+    const d = dx(u);
+    if (Math.abs(d) < 1e-6) break;
+    u -= err / d;
+  }
+  let lo = 0;
+  let hi = 1;
+  u = x;
+  for (let i = 0; i < 24; i++) {
+    const err = sx(u) - x;
+    if (Math.abs(err) < 1e-6) break;
+    if (err < 0) lo = u;
+    else hi = u;
+    u = (lo + hi) / 2;
+  }
+  return sy(u);
+}
+
+export function easeAlpha(ease: Ease | undefined, u: number, bez?: Bez): number {
+  if (ease === 'custom') return evalCubicBezier(bez ?? DEFAULT_BEZ, u);
   return (EASE_FUNCS[ease ?? 'linear'] ?? EASE_FUNCS.linear)(u);
 }
 
@@ -28,12 +83,15 @@ export interface RotKey {
   t: number;
   q: Quat;
   ease?: Ease;
+  /** Handles for the 'custom' ease. */
+  bez?: Bez;
 }
 export interface PosKey {
   id: number;
   t: number;
   p: Vec3; // offset from T-pose rest position, meters
   ease?: Ease;
+  bez?: Bez;
 }
 
 export interface VrmaData {

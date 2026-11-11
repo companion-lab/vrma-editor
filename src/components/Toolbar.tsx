@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Bone,
+  Bot,
   ChevronDown,
   Check,
   Download,
@@ -235,6 +236,18 @@ export function Toolbar() {
       <div className="spacer" />
 
       {status && <div className={`status ${status.kind}`}>{status.msg}</div>}
+
+      <button
+        className="btn icon"
+        title="Open the AI assistant panel"
+        onClick={() => {
+          const st = useEditor.getState();
+          st.setRightTab('ai');
+          st.setRightOpen(true);
+        }}
+      >
+        <Bot size={15} />
+      </button>
 
       <button
         className={`btn icon ${showSkeleton ? 'active' : ''}`}
