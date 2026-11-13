@@ -146,6 +146,7 @@ src/
     mocap/webcam.ts    camera access + webcam recording (getUserMedia + MediaRecorder)
     vrmedit/glb.ts     GLB container parse / repack, image embedding
     vrmedit/live.ts    live model edits (materials, expressions, bone scale)
+    vrmedit/proportions.ts  proportion config shared by live preview + export
     vrmedit/parts.ts   asset parts: per-primitive collection, categories, visibility
     vrmedit/exportModel.ts  edits → original file's glTF JSON patch (.vrm export)
   components/

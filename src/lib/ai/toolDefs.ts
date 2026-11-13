@@ -263,10 +263,10 @@ const setExpression = obj(
 );
 
 const setBoneScale = obj(
-  'Scale a body part proportionally (uniform factor, 1 = original). Bones: head, neck, upperChest, chest, spine, hips, shoulders, arms (upper/lower), hands, legs (upper/lower), feet — left/right prefixed. Adjacent segments compose cleanly. Baked into the model on save.',
+  'Scale a body part (factor 0.5..1.5, 1 = original): torso & limbs thicken in place (girth only, length unchanged); head/hands/hips scale the whole part (hips scales the whole body with feet kept planted). Bones: head, neck, upperChest, chest, spine, hips, shoulders, arms (upper/lower), hands, legs (upper/lower), feet — left/right prefixed. Adjacent segments compose cleanly. Baked into the model on save.',
   {
     bone: { type: 'string', description: 'e.g. head, leftUpperArm, rightUpperLeg' },
-    factor: { type: 'number', description: 'Uniform scale factor, 1 = unchanged (e.g. 1.2 = +20%)' },
+    factor: { type: 'number', description: 'Scale factor 0.5..1.5, 1 = unchanged (e.g. 1.2 = +20%)' },
   },
   ['bone', 'factor'],
 );

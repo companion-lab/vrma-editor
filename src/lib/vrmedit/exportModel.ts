@@ -7,6 +7,7 @@ import type { MaterialEdit, ModelEdits } from '../../store';
 import { BONE_ORDER } from '../humanoid';
 import { appendImage, copyBin, mimeTypeFor, parseGlb, writeGlb } from './glb';
 import { parsePartId } from './parts';
+import { COMPENSATE_CHILD_SCALE, LENGTH_AXIS_CHILD, THICKEN_BONES } from './proportions';
 
 // VRM 0.x blendshape preset names ↔ VRM 1.0 expression presets.
 // Mirrors three-vrm's v0v1PresetNameMap so names seen in the editor
@@ -416,18 +417,68 @@ function humanoidBoneNode(json: Record<string, any>, bone: string): number | und
   return hb[bone]?.node;
 }
 
-// Must mirror the COMPENSATE_* sets in lib/vrmedit/live.ts: torso/limb bones
-// divide their children's scale (and position, except shoulders) so the part
-// thickens without stretching or displacing its neighbours.
-const COMPENSATE_CHILD_SCALE = new Set(['leftShoulder', 'rightShoulder']);
-const COMPENSATE_CHILD_FULL = new Set([
-  'spine',
-  'chest',
-  'upperChest',
-  'neck',
-  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
-  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
-]);
+// Bone behaviour (which bones thicken, which compensate children) is shared
+// with the live preview via ./proportions, so the export always matches what
+// the user saw: torso & limb bones thicken (scale only the two local axes
+// perpendicular to the bone's length and divide their children's
+// scale/translation on those axes, so the part thickens without stretching or
+// displacing its neighbours); shoulders pivot the arm outward; head/hands/
+// feet/hips scale the whole part.
+
+/** Local axis (0=x, 1=y, 2=z) a bone node points along, judged from the first
+ *  canonical child's rest translation; falls back to the largest-offset
+ *  child, then Y. Matches live.ts boneLengthAxis. */
+function gltfLengthAxis(json: Record<string, any>, bone: string, node: Record<string, any>): 0 | 1 | 2 {
+  let probe: number[] | undefined;
+  const children = node.children ?? [];
+  for (const name of LENGTH_AXIS_CHILD[bone] ?? []) {
+    const idx = humanoidBoneNode(json, name);
+    if (idx != null && children.includes(idx)) {
+      probe = json.nodes?.[idx]?.translation;
+      if (probe) break;
+    }
+  }
+  if (!probe) {
+    let best = 0;
+    for (const ci of children) {
+      const t = json.nodes?.[ci]?.translation;
+      if (!t) continue;
+      const m = Math.max(Math.abs(t[0]), Math.abs(t[1]), Math.abs(t[2]));
+      if (m > best) {
+        best = m;
+        probe = t;
+      }
+    }
+  }
+  if (!probe) return 1;
+  const ax = Math.abs(probe[0]);
+  const ay = Math.abs(probe[1]);
+  const az = Math.abs(probe[2]);
+  return ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+}
+
+/** Height (metres) of a node above the model root, summing translation[1] up
+ *  the parent chain — valid because humanoid bones rest unrotated in VRM. */
+function nodeHeightY(json: Record<string, any>, idx: number): number {
+  const parent = new Map<number, number>();
+  (json.nodes ?? []).forEach((n: any, i: number) => (n.children ?? []).forEach((c: number) => parent.set(c, i)));
+  let y = 0;
+  for (let cur: number | undefined = idx; cur != null; cur = parent.get(cur)) {
+    y += json.nodes?.[cur]?.translation?.[1] ?? 0;
+  }
+  return y;
+}
+
+/** Hips height above the lowest foot/toe node — the lift a whole-body hips
+ *  scale needs so the model keeps standing on the floor. 0 when unknown. */
+function hipsToFeetDistance(json: Record<string, any>, hipsIdx: number): number {
+  const feet = ['leftFoot', 'rightFoot', 'leftToes', 'rightToes']
+    .map((b) => humanoidBoneNode(json, b))
+    .filter((i): i is number => i != null);
+  if (feet.length === 0) return 0;
+  const hipsY = nodeHeightY(json, hipsIdx);
+  return Math.max(0, hipsY - Math.min(...feet.map((i) => nodeHeightY(json, i))));
+}
 
 function applyBoneScaleEdits(json: Record<string, any>, boneScale: Record<string, number>): void {
   // Parents first (BONE_ORDER is depth-first), multiplying/dividing CURRENT
@@ -439,17 +490,44 @@ function applyBoneScaleEdits(json: Record<string, any>, boneScale: Record<string
     const nodeIdx = humanoidBoneNode(json, bone);
     const node = nodeIdx != null ? json.nodes?.[nodeIdx] : null;
     if (!node) continue;
-    node.scale = (node.scale ?? [1, 1, 1]).map((v: number) => v * factor);
 
-    const full = COMPENSATE_CHILD_FULL.has(bone);
-    if (full || COMPENSATE_CHILD_SCALE.has(bone)) {
+    if (THICKEN_BONES.has(bone)) {
+      const axis = gltfLengthAxis(json, bone, node);
+      const fx = axis === 0 ? 1 : factor;
+      const fy = axis === 1 ? 1 : factor;
+      const fz = axis === 2 ? 1 : factor;
+      const s = node.scale ?? [1, 1, 1];
+      node.scale = [s[0] * fx, s[1] * fy, s[2] * fz];
       for (const ci of node.children ?? []) {
         const child = json.nodes?.[ci];
         if (!child) continue;
         const cs = child.scale ?? [1, 1, 1];
-        child.scale = [cs[0] / factor, cs[1] / factor, cs[2] / factor];
-        if (full && child.translation) {
-          child.translation = child.translation.map((v: number) => v / factor);
+        child.scale = [cs[0] / fx, cs[1] / fy, cs[2] / fz];
+        if (child.translation) {
+          child.translation = [
+            child.translation[0] / fx,
+            child.translation[1] / fy,
+            child.translation[2] / fz,
+          ];
+        }
+      }
+    } else {
+      node.scale = (node.scale ?? [1, 1, 1]).map((v: number) => v * factor);
+      if (COMPENSATE_CHILD_SCALE.has(bone)) {
+        for (const ci of node.children ?? []) {
+          const child = json.nodes?.[ci];
+          if (!child) continue;
+          const cs = child.scale ?? [1, 1, 1];
+          child.scale = [cs[0] / factor, cs[1] / factor, cs[2] / factor];
+        }
+      } else if (bone === 'hips' && nodeIdx != null) {
+        // Whole-body scale raises the legs off the ground by the leg-length
+        // growth — translate the hips up by the same amount so the model keeps
+        // standing on its feet (mirrors the live hips lift).
+        const drop = hipsToFeetDistance(json, nodeIdx);
+        if (drop > 0) {
+          const t = node.translation ?? [0, 0, 0];
+          node.translation = [t[0], t[1] + (factor - 1) * drop, t[2]];
         }
       }
     }

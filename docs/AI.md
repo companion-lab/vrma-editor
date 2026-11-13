@@ -133,7 +133,7 @@ Try it without a client: `npx @modelcontextprotocol/inspector node mcp/server.mj
 | `set_material` / `reset_material` | Color, emissive, opacity, alphaMode, doubleSided |
 | `set_visibility` | Hide/show meshes and parts |
 | `set_expression` | Expression weight 0..1 — the *static rest face* (baked into the model on save; to animate use `add_expression_key`) |
-| `set_bone_scale` | Proportions (uniform factor per body part) |
+| `set_bone_scale` | Proportions (factor 0.5..1.5) — torso & limbs thicken in place, head/hands/hips scale the whole part |
 | `set_meta` | Model meta fields (author, title, license…) |
 | `apply_outfit` / `save_outfit` | Saved visibility presets |
 | `load_model` | Switch model from the library |

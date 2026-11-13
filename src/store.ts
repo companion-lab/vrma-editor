@@ -246,6 +246,9 @@ interface EditorState {
   // model
   vrm: VRM | null;
   restHipsPos: Vector3;
+  /** Rest height (metres) of the lowest foot/toe node — with restHipsPos.y this
+   *  is the leg drop the hips lift compensates when the whole body is scaled. */
+  restFeetY: number;
   modelUrl: string | null;
   modelName: string;
   modelLoading: boolean;
@@ -321,7 +324,7 @@ interface EditorState {
   setTheme: (t: Theme) => void;
 
   // actions
-  setVrm: (vrm: VRM | null, restHips: Vector3, name: string) => void;
+  setVrm: (vrm: VRM | null, restHips: Vector3, restFeetY: number, name: string) => void;
   setModelUrl: (url: string | null, name: string) => void;
   setModelLoading: (v: boolean) => void;
   fetchModelLibrary: () => Promise<void>;
@@ -428,6 +431,7 @@ let statusSeq = 0;
 export const useEditor = create<EditorState>()((set, get) => ({
   vrm: null,
   restHipsPos: new Vector3(),
+  restFeetY: 0,
   modelUrl: loadLastModel()?.url ?? '/models/demo.glb',
   modelName: loadLastModel()?.name ?? 'demo.glb',
   modelLoading: true,
@@ -534,7 +538,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return ui;
     }),
 
-  setVrm: (vrm, restHips, name) =>
+  setVrm: (vrm, restHips, restFeetY, name) =>
     set((st) => {
       // A fresh authoring session uses the model's own rest height; an
       // already-loaded animation keeps the rest height it was authored with.
@@ -545,6 +549,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return {
         vrm,
         restHipsPos: restHips,
+        restFeetY,
         modelName: name,
         modelLoading: false,
         ...(isEmpty ? { animRestHipsY: restHips.y || 1 } : {}),

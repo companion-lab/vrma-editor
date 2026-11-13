@@ -27,6 +27,11 @@ import {
   classifyAsset,
   type AssetPart,
 } from '../lib/vrmedit/parts';
+import {
+  PROPORTION_GROUPS,
+  PROPORTION_MAX,
+  PROPORTION_MIN,
+} from '../lib/vrmedit/proportions';
 
 const COLOR_SPACE = THREE.SRGBColorSpace;
 
@@ -543,21 +548,6 @@ function MetaSection({ edits }: { edits: ModelEdits }) {
 
 // --- Proportions ---
 
-const PROPORTION_GROUPS: { label: string; bones: string[]; pair?: boolean }[] = [
-  { label: 'Head', bones: ['head'] },
-  { label: 'Neck', bones: ['neck'] },
-  { label: 'Chest', bones: ['upperChest', 'chest'] },
-  { label: 'Spine', bones: ['spine'] },
-  { label: 'Hips (whole body)', bones: ['hips'] },
-  { label: 'Shoulders', bones: ['leftShoulder', 'rightShoulder'], pair: true },
-  { label: 'Upper arms', bones: ['leftUpperArm', 'rightUpperArm'], pair: true },
-  { label: 'Lower arms', bones: ['leftLowerArm', 'rightLowerArm'], pair: true },
-  { label: 'Hands', bones: ['leftHand', 'rightHand'], pair: true },
-  { label: 'Upper legs', bones: ['leftUpperLeg', 'rightUpperLeg'], pair: true },
-  { label: 'Lower legs', bones: ['leftLowerLeg', 'rightLowerLeg'], pair: true },
-  { label: 'Feet', bones: ['leftFoot', 'rightFoot'], pair: true },
-];
-
 function ProportionsSection({ edits }: { edits: ModelEdits }) {
   const vrm = useEditor((s) => s.vrm);
   const groups = useMemo(
@@ -568,12 +558,13 @@ function ProportionsSection({ edits }: { edits: ModelEdits }) {
   if (!vrm) return null;
   if (groups.length === 0) return <div className="muted pad">No humanoid bones found.</div>;
 
-  // Pair groups scale both sides; the rest use the first existing bone
-  // (e.g. upperChest when present, else chest).
-  const targetsOf = (g: { bones: string[]; pair?: boolean }) =>
-    g.pair
-      ? g.bones.filter((b) => boneHasNode(vrm, b))
-      : [g.bones.find((b) => boneHasNode(vrm, b)) ?? g.bones[0]];
+  // Pair groups scale both sides; scalar groups drive every listed bone that
+  // exists (e.g. Chest thickens chest AND upperChest — the child compensation
+  // cancels the double-scale, so the whole chest region gets one even factor).
+  const targetsOf = (g: { bones: string[]; pair?: boolean }) => {
+    const existing = g.bones.filter((b) => boneHasNode(vrm, b));
+    return existing.length ? existing : g.bones.slice(0, 1);
+  };
 
   const apply = (bones: string[], factor: number) => {
     for (const b of bones) useEditor.getState().setBoneScale(b, factor);
@@ -604,13 +595,22 @@ function ProportionsSection({ edits }: { edits: ModelEdits }) {
             <span className="expr-name">{g.label}</span>
             <input
               type="range"
-              min={0.5}
-              max={1.5}
+              min={PROPORTION_MIN}
+              max={PROPORTION_MAX}
               step={0.01}
               value={factor}
               onChange={(e) => apply(targets, parseFloat(e.target.value))}
             />
             <span className="ctl-val">×{factor.toFixed(2)}</span>
+            <button
+              className="btn small"
+              title={`Reset ${g.label} to ×1.00`}
+              aria-label={`Reset ${g.label}`}
+              disabled={Math.abs(factor - 1) < 0.005}
+              onClick={() => apply(targets, 1)}
+            >
+              <RotateCcw size={11} />
+            </button>
           </div>
         );
       })}

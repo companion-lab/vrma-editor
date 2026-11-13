@@ -10,7 +10,7 @@ import { liveTracker } from '../lib/mocap/live';
 import { SkeletonOverlay, setSkeletonTheme } from '../lib/skeleton';
 import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
-import { applyAllEdits, collectMaterials, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
+import { applyAllEdits, applyHipsLift, collectMaterials, hipsLiftOffset, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
 import { registerPartAssociations } from '../lib/vrmedit/parts';
 import { registerViewport } from '../lib/ai/sceneRef';
 
@@ -126,6 +126,10 @@ export function Viewport() {
           applyExpressions(vrm, anim, st.time);
         }
         vrm.update(dt);
+        // Whole-body hips scale: the humanoid sync above resets the hips node
+        // from the normalized rig every frame, so re-apply the lift that keeps
+        // the feet on the floor (the same offset is baked in on export).
+        applyHipsLift(vrm, hipsLiftOffset(st.modelEdits.boneScale, st.restHipsPos.y, st.restFeetY));
       }
       overlay.update(st);
       orbit.update();
@@ -324,6 +328,15 @@ export function Viewport() {
       refs.orbit.update();
 
       const restHips = getNormNode(vrm, 'hips')?.position.clone() ?? new THREE.Vector3();
+      // Lowest foot/toe rest height, for the whole-body hips lift (feet planted).
+      const rawBone = (b: string) => vrm.humanoid?.getRawBoneNode(b as never) as THREE.Object3D | undefined;
+      const restFeetY = Math.min(
+        ...['leftFoot', 'rightFoot', 'leftToes', 'rightToes'].flatMap((b) => {
+          const n = rawBone(b);
+          return n ? [n.getWorldPosition(new THREE.Vector3()).y] : [];
+        }),
+        restHips.y,
+      );
       clearManipulated();
       snapshotMaterials(vrm);
 
@@ -359,7 +372,7 @@ export function Viewport() {
       });
 
       const st = useEditor.getState();
-      st.setVrm(vrm, restHips, st.modelName);
+      st.setVrm(vrm, restHips, restFeetY, st.modelName);
       st.setModelAssociations({ materialIndexByName, meshNodeIndicesByName });
       // Primitive child → glTF mesh/primitive mapping for the Assets (parts) editor.
       registerPartAssociations(vrm, gltf.parser.associations);

@@ -21,6 +21,7 @@ import {
   stripOutlineSuffix,
 } from '../vrmedit/live';
 import { applyAssetVisibilityAll, collectParts, collectWholeMeshes } from '../vrmedit/parts';
+import { PROPORTION_MAX, PROPORTION_MIN } from '../vrmedit/proportions';
 import { BONE_ORDER, BONE_PARENTS } from '../humanoid';
 import { getViewport } from './sceneRef';
 
@@ -570,7 +571,12 @@ function toolSetBoneScale(args: { bone?: unknown; factor?: unknown }) {
   if (!boneHasNode(vrm, bone)) {
     throw new ToolError(`Unknown bone "${bone}" for proportions. Try: head, neck, spine, chest, upperChest, hips, shoulders, arms, hands, legs, feet.`);
   }
-  const factor = Math.min(4, Math.max(0.25, args.factor));
+  // Same range as the panel sliders (lib/vrmedit/proportions.ts) so the AI
+  // cannot set values the UI can't represent.
+  if (args.factor < PROPORTION_MIN || args.factor > PROPORTION_MAX) {
+    throw new ToolError(`factor must be between ${PROPORTION_MIN} and ${PROPORTION_MAX} (1 = unchanged)`);
+  }
+  const factor = args.factor;
   const st = useEditor.getState();
   st.setBoneScale(bone, factor);
   applyAllBoneScales(vrm, useEditor.getState().modelEdits.boneScale);

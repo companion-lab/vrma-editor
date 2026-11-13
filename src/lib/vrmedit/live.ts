@@ -7,6 +7,12 @@ import type { MaterialEdit, ModelEdits } from '../../store';
 import { BONE_ORDER } from '../humanoid';
 import { applyAssetVisibilityAll } from './parts';
 import {
+  COMPENSATE_CHILD_SCALE,
+  EDITABLE_BONES,
+  LENGTH_AXIS_CHILD,
+  THICKEN_BONES,
+} from './proportions';
+import {
   DoubleSide,
   FrontSide,
   TextureLoader,
@@ -217,29 +223,30 @@ export function applyExpressionWeight(vrm: VRM, name: string, weight: number): v
 }
 
 // --- Bone scale (proportions) ---
+// The bone behaviour config lives in ./proportions (shared with exportModel.ts).
 
-// Torso/limb bones compensate their children so the part gets thicker without
-// displacing or inflating its neighbours (scaling a raw bone node otherwise
-// drags child joints along and stretches the skin between them).
-const COMPENSATE_CHILD_SCALE = new Set(['leftShoulder', 'rightShoulder']);
-const COMPENSATE_CHILD_FULL = new Set([
-  'spine',
-  'chest',
-  'upperChest',
-  'neck',
-  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
-  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
-]);
-
-// Every bone a proportion slider can scale.
-const EDITABLE_BONES = [
-  'head', 'neck', 'chest', 'upperChest', 'spine', 'hips',
-  'leftShoulder', 'rightShoulder',
-  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm',
-  'leftHand', 'rightHand',
-  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
-  'leftFoot', 'rightFoot',
-];
+/** Local axis (0=x, 1=y, 2=z) a bone points along, judged from the first
+ *  canonical child bone that is a direct child; falls back to the
+ *  largest-offset child, then Y. */
+function boneLengthAxis(vrm: VRM, bone: string, node: Object3D): 0 | 1 | 2 {
+  let probe: Object3D | undefined;
+  for (const name of LENGTH_AXIS_CHILD[bone] ?? []) {
+    const candidate = rawBoneNode(vrm, name);
+    if (candidate && candidate.parent === node) {
+      probe = candidate;
+      break;
+    }
+  }
+  probe ??= node.children.reduce<Object3D | undefined>(
+    (a, b) => (b.position.lengthSq() > (a?.position.lengthSq() ?? 0) ? b : a),
+    undefined,
+  );
+  if (!probe) return 1;
+  const ax = Math.abs(probe.position.x);
+  const ay = Math.abs(probe.position.y);
+  const az = Math.abs(probe.position.z);
+  return ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+}
 
 interface NodeRest {
   pos: [number, number, number];
@@ -269,7 +276,9 @@ function rawBoneNode(vrm: VRM, bone: string): Object3D | null {
  * (and the children that compensation touches) to the file's rest transform
  * first, then applies each factor parents-first on top of current values — so
  * the result is idempotent, and adjacent segments compose cleanly (a ×1.2
- * upper arm and ×1.3 forearm give a ×1.3 forearm, never ×1.56).
+ * upper arm and ×1.3 forearm give a ×1.3 forearm, never ×1.56). Torso & limb
+ * factors thicken their part (girth only, length axis untouched); head/hands/
+ * hips/feet scale the whole part.
  */
 export function applyAllBoneScales(vrm: VRM, boneScale: Record<string, number>): void {
   if (!vrm.humanoid) return;
@@ -294,15 +303,55 @@ export function applyAllBoneScales(vrm: VRM, boneScale: Record<string, number>):
     if (factor == null || Math.abs(factor - 1) < 0.005) continue;
     const node = rawBoneNode(vrm, bone);
     if (!node) continue;
-    node.scale.multiplyScalar(factor);
-    const full = COMPENSATE_CHILD_FULL.has(bone);
-    if (full || COMPENSATE_CHILD_SCALE.has(bone)) {
+
+    if (THICKEN_BONES.has(bone)) {
+      // thicken in place: grow the two axes perpendicular to the bone's length
+      // and divide the children's scale/position on the grown axes so the
+      // joints stay put and child parts don't inherit the girth
+      const axis = boneLengthAxis(vrm, bone, node);
+      const fx = axis === 0 ? 1 : factor;
+      const fy = axis === 1 ? 1 : factor;
+      const fz = axis === 2 ? 1 : factor;
+      node.scale.set(node.scale.x * fx, node.scale.y * fy, node.scale.z * fz);
       for (const child of node.children) {
-        child.scale.divideScalar(factor);
-        if (full) child.position.divideScalar(factor);
+        child.scale.set(child.scale.x / fx, child.scale.y / fy, child.scale.z / fz);
+        child.position.set(child.position.x / fx, child.position.y / fy, child.position.z / fz);
+      }
+    } else {
+      // head / hands / feet / hips (whole body): scale the whole part
+      node.scale.multiplyScalar(factor);
+      if (COMPENSATE_CHILD_SCALE.has(bone)) {
+        for (const child of node.children) child.scale.divideScalar(factor);
       }
     }
   }
+}
+
+/**
+ * Vertical hips offset (metres) that keeps the feet planted when the whole
+ * body is scaled: uniform hips scaling grows the legs downward too, sinking
+ * the model through the floor by exactly the leg-length growth.
+ */
+export function hipsLiftOffset(boneScale: Record<string, number>, restHipsY: number, restFeetY: number): number {
+  const factor = boneScale.hips ?? 1;
+  if (Math.abs(factor - 1) < 0.005) return 0;
+  return (factor - 1) * Math.max(0, restHipsY - restFeetY);
+}
+
+/**
+ * Add the whole-body lift to the hips node. Call after `vrm.update()` each
+ * frame: the humanoid sync rewrites the hips position from the normalized rig
+ * (which never sees the lift), so it must be re-applied every frame. The same
+ * offset is baked into the hips translation on export.
+ */
+export function applyHipsLift(vrm: VRM, lift: number): void {
+  const hips = rawBoneNode(vrm, 'hips');
+  const parent = hips?.parent;
+  // The offset is vertical in the parent's space — only safe when the hips
+  // parent is unscaled and upright (the standard VRM rig).
+  if (!hips || !parent) return;
+  if (Math.abs(parent.scale.x - 1) > 1e-4 || Math.abs(parent.scale.y - 1) > 1e-4) return;
+  if (lift !== 0) hips.position.y += lift;
 }
 
 export function restBoneScale(vrm: VRM, bone: string): [number, number, number] {
