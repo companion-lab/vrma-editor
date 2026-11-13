@@ -3,10 +3,12 @@
 // { ok: true, result } or { ok: false, error } — never throws.
 
 import { Color, Euler, Quaternion } from 'three';
-import { useEditor, HIPS_TRACK_ID } from '../../store';
+import { useEditor, exprTrackId, exprNameOf, isExprTrack, HIPS_TRACK_ID } from '../../store';
 import { captureHipsPosition, captureQuat, getNormNode } from '../animation';
-import { allocKeyId, EASES, type Ease, type PosKey, type RotKey, type VrmaData } from '../vrma/parse';
+import { allocKeyId, EASES, type Ease, type ExprKey, type PosKey, type RotKey, type VrmaData } from '../vrma/parse';
 import { buildVRMA } from '../vrma/build';
+import { extractPosesRange, loadVideoMeta } from '../mocap/pose';
+import { retargetPoses } from '../mocap/retarget';
 import { exportEditedModel } from '../vrmedit/exportModel';
 import {
   applyAllBoneScales,
@@ -70,11 +72,15 @@ function hexToLinear(hex: string): [number, number, number] {
   return [c.r, c.g, c.b];
 }
 
-/** Live euler degrees → canonical quaternion (the inverse of the pose sliders + captureQuat). */
-function eulerDegToCanonical(eulerDeg: unknown, isVrm0: boolean): [number, number, number, number] {
+/** Euler degrees (canonical space, YXZ) → canonical quaternion.
+ *  Euler input is authored in the same canonical space as set_animation
+ *  quaternions (identity = T-pose, model facing +Z toward the camera). The
+ *  VRM 0.x live-space mirroring is applied ONLY at playback (applyPose) —
+ *  never at authoring, or the signs would flip twice and come out inverted. */
+function eulerDegToCanonical(eulerDeg: unknown): [number, number, number, number] {
   const [x, y, z] = num3(eulerDeg, 'euler');
   const q = new Quaternion().setFromEuler(new Euler(x * DEG, y * DEG, z * DEG, 'YXZ'));
-  return isVrm0 ? [-q.x, q.y, -q.z, q.w] : [q.x, q.y, q.z, q.w];
+  return [q.x, q.y, q.z, q.w];
 }
 
 function downloadBlob(data: ArrayBuffer, filename: string, mime: string): void {
@@ -104,6 +110,10 @@ async function toolGetState() {
   for (const [bone, keys] of Object.entries(st.rotTracks)) {
     if (keys?.length) keyed[bone] = keys.length;
   }
+  const keyedExpr: Record<string, number> = {};
+  for (const [name, keys] of Object.entries(st.exprTracks)) {
+    if (keys.length) keyedExpr[name] = keys.length;
+  }
   return {
     model: {
       loaded: !!st.vrm,
@@ -120,6 +130,7 @@ async function toolGetState() {
       restHipsY: st.animRestHipsY,
       keyedBones: keyed,
       hipsKeys: st.hipsTrack.length,
+      keyedExpressions: keyedExpr,
       time: st.time,
     },
     transport: { playing: st.playing, loop: st.loop, autoKey: st.autoKey, snap: st.snap },
@@ -178,6 +189,7 @@ function toolListExpressions() {
       current: vrm.expressionManager?.getValue(name) ?? 0,
       baked: baked[name] ?? 0,
       edited: st.modelEdits.expressions[name] ?? null,
+      keys: st.exprTracks[name]?.length ?? 0,
     })),
   };
 }
@@ -210,14 +222,24 @@ function normalizeVrmaData(v: unknown): VrmaData {
   for (const [bone, keys] of Object.entries(tracksIn)) {
     if (!Array.isArray(keys)) throw new ToolError(`rotTracks.${bone} must be an array of keys`);
     rotTracks[bone] = keys.map((k, i) => {
-      const key = k as Partial<RotKey> & { t: number; q: number[] };
-      if (typeof key.t !== 'number' || !Array.isArray(key.q)) {
-        throw new ToolError(`rotTracks.${bone}[${i}] needs { t: number, q: [x,y,z,w] }`);
+      const key = k as Partial<RotKey> & { t: number; q?: number[]; euler?: number[] };
+      if (typeof key.t !== 'number') {
+        throw new ToolError(`rotTracks.${bone}[${i}] needs { t: number, q: [x,y,z,w] } or { t: number, euler: [x,y,z] }`);
+      }
+      // q is canonical-space; euler is canonical-space degrees (YXZ). Both
+      // accept either form — euler is converted here so the model never has
+      // to do its own euler→quaternion math (a common source of flipped
+      // limb directions).
+      let q: [number, number, number, number];
+      if (key.q != null) q = quat4(key.q);
+      else if (key.euler != null) q = eulerDegToCanonical(key.euler);
+      else {
+        throw new ToolError(`rotTracks.${bone}[${i}] needs { t, q: [x,y,z,w] } or { t, euler: [x,y,z] }`);
       }
       return {
         id: typeof key.id === 'number' ? key.id : allocKeyId(),
         t: key.t,
-        q: quat4(key.q),
+        q,
         ...(key.ease != null ? { ease: asEase(key.ease) } : {}),
       } as RotKey;
     });
@@ -236,6 +258,23 @@ function normalizeVrmaData(v: unknown): VrmaData {
         } as PosKey;
       })
     : [];
+  const exprTracks: Record<string, ExprKey[]> = {};
+  const exprIn = (a.exprTracks ?? {}) as Record<string, unknown>;
+  for (const [name, keys] of Object.entries(exprIn)) {
+    if (!Array.isArray(keys)) throw new ToolError(`exprTracks.${name} must be an array of keys`);
+    exprTracks[name] = keys.map((k, i) => {
+      const key = k as Partial<ExprKey> & { t: number; w?: unknown };
+      if (typeof key.t !== 'number' || typeof key.w !== 'number' || !Number.isFinite(key.w)) {
+        throw new ToolError(`exprTracks.${name}[${i}] needs { t: number, w: number } (weight 0..1)`);
+      }
+      return {
+        id: typeof key.id === 'number' ? key.id : allocKeyId(),
+        t: key.t,
+        w: Math.min(1, Math.max(0, key.w)),
+        ...(key.ease != null ? { ease: asEase(key.ease) } : {}),
+      } as ExprKey;
+    });
+  }
   const restHipsY =
     typeof a.restHipsY === 'number' && Number.isFinite(a.restHipsY)
       ? a.restHipsY
@@ -246,6 +285,7 @@ function normalizeVrmaData(v: unknown): VrmaData {
     restHipsY,
     rotTracks,
     hipsTrack,
+    exprTracks,
   };
 }
 
@@ -279,11 +319,10 @@ function toolAddRotationKey(args: {
 
   if (typeof args.time === 'number' && Number.isFinite(args.time)) poseAt(args.time);
   const st = useEditor.getState();
-  const flip = vrm.meta?.metaVersion === '0';
 
   let q: [number, number, number, number];
   if (args.quaternion != null) q = quat4(args.quaternion);
-  else if (args.euler != null) q = eulerDegToCanonical(args.euler, flip);
+  else if (args.euler != null) q = eulerDegToCanonical(args.euler);
   else {
     const captured = captureQuat(vrm, args.bone);
     if (!captured) throw new ToolError(`Could not capture the current pose of "${args.bone}".`);
@@ -323,15 +362,48 @@ function toolAddHipsKey(args: { time?: unknown; offset?: unknown; pos?: unknown;
   return { keyed: HIPS_TRACK_ID, t, keys: s.hipsTrack.length };
 }
 
+function toolAddExpressionKey(args: { name?: unknown; weight?: unknown; time?: unknown; ease?: unknown }) {
+  const name = typeof args.name === 'string' ? args.name : '';
+  if (!name) throw new ToolError('name is required (see list_expressions)');
+  const vrm = requireVrm();
+  if (!expressionNames(vrm).includes(name)) {
+    throw new ToolError(`Unknown expression "${name}". Call list_expressions.`);
+  }
+  if (typeof args.time === 'number' && Number.isFinite(args.time)) poseAt(args.time);
+
+  // Default to the live weight — key whatever the face is doing right now.
+  let w: number;
+  if (args.weight != null) {
+    if (typeof args.weight !== 'number' || !Number.isFinite(args.weight)) {
+      throw new ToolError('weight must be a number 0..1');
+    }
+    w = Math.min(1, Math.max(0, args.weight));
+    applyExpressionWeight(vrm, name, w);
+  } else {
+    w = Math.min(1, Math.max(0, vrm.expressionManager?.getValue(name) ?? 0));
+  }
+
+  const st = useEditor.getState();
+  st.upsertExprKey(name, w);
+  const s = useEditor.getState();
+  const keys = s.exprTracks[name] ?? [];
+  const sel = s.selectedKey;
+  if (args.ease != null && sel) st.setKeyEase(sel.track, sel.id, asEase(args.ease)!, undefined, { history: false });
+  const t = keys.find((k) => sel && k.id === sel.id)?.t ?? s.time;
+  return { keyed: exprTrackId(name), t, keys: keys.length };
+}
+
 function toolClearTrack(args: { track?: unknown }) {
   if (typeof args.track !== 'string' || !args.track) throw new ToolError('track is required');
   const st = useEditor.getState();
   const n =
     args.track === HIPS_TRACK_ID
       ? st.hipsTrack.length
-      : st.rotTracks[args.track]?.length ?? 0;
+      : isExprTrack(args.track)
+        ? st.exprTracks[exprNameOf(args.track)]?.length ?? 0
+        : st.rotTracks[args.track]?.length ?? 0;
   if (n === 0) return { cleared: 0, note: 'Track already empty' };
-  if (args.track !== HIPS_TRACK_ID && !getNormNode(requireVrm(), args.track)) {
+  if (args.track !== HIPS_TRACK_ID && !isExprTrack(args.track) && !getNormNode(requireVrm(), args.track)) {
     throw new ToolError(`Unknown track "${args.track}".`);
   }
   st.deleteBoneKeys(args.track);
@@ -341,7 +413,11 @@ function toolClearTrack(args: { track?: unknown }) {
 function findKey(track: string, keyId: unknown): { id: number; t: number } {
   if (typeof keyId !== 'number') throw new ToolError('keyId must be a number (see get_animation)');
   const st = useEditor.getState();
-  const keys = track === HIPS_TRACK_ID ? st.hipsTrack : st.rotTracks[track] ?? [];
+  const keys = track === HIPS_TRACK_ID
+    ? st.hipsTrack
+    : isExprTrack(track)
+      ? st.exprTracks[exprNameOf(track)] ?? []
+      : st.rotTracks[track] ?? [];
   const key = keys.find((k) => k.id === keyId);
   if (!key) throw new ToolError(`Key ${keyId} not found on track "${track}". Call get_animation for valid ids.`);
   return { id: key.id, t: key.t };
@@ -553,8 +629,9 @@ async function toolLoadModel(args: { name?: unknown }) {
 
 function toolExportAnimation() {
   const st = useEditor.getState();
+  const exprKeys = Object.values(st.exprTracks).reduce((n, k) => n + k.length, 0);
   const keyCount =
-    Object.values(st.rotTracks).reduce((n, k) => n + (k?.length ?? 0), 0) + st.hipsTrack.length;
+    Object.values(st.rotTracks).reduce((n, k) => n + (k?.length ?? 0), 0) + st.hipsTrack.length + exprKeys;
   if (keyCount === 0) throw new ToolError('Nothing to export — the animation has no keyframes.');
   const buffer = buildVRMA(st.getAnimData());
   const filename = safeName(st.animName || 'animation', 'vrma');
@@ -573,15 +650,156 @@ async function toolSaveModel() {
   return { saved: filename, bytes: out.byteLength, edits: Object.keys(cur.modelEdits).length };
 }
 
+// --- Motion reference (video) ---
+
+function requireMotionVideo(): { url: string; name: string } {
+  const st = useEditor.getState();
+  if (!st.motionVideoUrl) {
+    throw new ToolError(
+      'No motion video loaded. Ask the user to load one with the "Motion video…" button in the toolbar — there is no way for you to open a video yourself.',
+    );
+  }
+  return { url: st.motionVideoUrl, name: st.motionVideoName ?? 'Motion video' };
+}
+
+async function toolGetMotionVideoInfo() {
+  const { url, name } = requireMotionVideo();
+  const meta = await loadVideoMeta(url);
+  return { name, ...meta };
+}
+
+async function toolExtractMotion(args: {
+  fps?: unknown;
+  start?: unknown;
+  end?: unknown;
+  smooth?: unknown;
+  import?: unknown;
+}) {
+  const { url, name } = requireMotionVideo();
+  const num = (v: unknown, label: string): number | undefined => {
+    if (v == null) return undefined;
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new ToolError(`${label} must be a number`);
+    return v;
+  };
+  const fps = num(args.fps, 'fps');
+  const start = num(args.start, 'start');
+  const end = num(args.end, 'end');
+  const smooth = num(args.smooth, 'smooth');
+  const doImport = args.import !== false;
+
+  useEditor.getState().setStatus('info', 'Loading the pose-tracking model…');
+  let extract;
+  try {
+    // extractPosesRange chunks long spans into ≤60s pieces internally, so any
+    // video length works; progress covers the whole span.
+    extract = await extractPosesRange(url, {
+      fps,
+      start,
+      end,
+      onProgress: (done, total) =>
+        useEditor.getState().setStatus('info', `Extracting motion… ${done}/${total} frames`),
+    });
+  } catch (err) {
+    const msg = (err as Error)?.message ?? String(err);
+    throw new ToolError(
+      /fetch|network|cdn|internet|dns|decode/i.test(msg)
+        ? `Pose tracking could not start (it fetches the MediaPipe WASM runtime + model from a CDN on first use — check connectivity): ${msg}`
+        : msg,
+    );
+  }
+  if (extract.frames.length === 0) {
+    if (extract.cancelled) throw new ToolError('Extraction was cancelled.');
+    throw new ToolError(
+      'No person detected in the selected segment — check that the video actually shows a person (full body works best), or try a different start/end range.',
+    );
+  }
+
+  const segStart = start ?? 0;
+  const segEnd = end ?? extract.meta.duration;
+  const result = retargetPoses(
+    extract.frames,
+    {
+      name,
+      start: segStart,
+      duration: Math.max(0.1, segEnd - segStart),
+      width: extract.meta.width,
+      height: extract.meta.height,
+    },
+    { smooth, reductionDeg: 2 },
+  );
+
+  const keys = Object.values(result.tracks).reduce((n, k) => n + k, 0) + result.hipsKeys;
+  const coverage = extract.frames.length / Math.max(1, extract.totalFrames);
+  const warnings: string[] = [];
+  if (coverage < 0.7) {
+    warnings.push(
+      `only ${(coverage * 100).toFixed(0)}% of sampled frames had a detectable person — consider a cleaner segment`,
+    );
+  }
+  if (result.sparseTracks.length) {
+    warnings.push(`tracks with few keys (nearly static in the video, or partly occluded): ${result.sparseTracks.join(', ')}`);
+  }
+
+  if (doImport) {
+    const s = useEditor.getState();
+    s.importAnim(result.data);
+    s.setPlaying(true);
+  }
+
+  return {
+    imported: doImport,
+    video: { name, duration: +extract.meta.duration.toFixed(2) },
+    segment: { start: +segStart.toFixed(2), end: +segEnd.toFixed(2), fps: fps ?? 15 },
+    frames: extract.frames.length,
+    coveragePct: +(coverage * 100).toFixed(1),
+    tracks: result.tracks,
+    hipsKeys: result.hipsKeys,
+    keys,
+    ...(warnings.length ? { warnings } : {}),
+  };
+}
+
+/** Capture size for degenerate viewports (hidden/occluded tabs have no layout). */
+const SCREENSHOT_FALLBACK: [number, number] = [1280, 960];
+
 function toolScreenshot() {
   const vp = getViewport();
   if (!vp) throw new ToolError('Viewport not ready yet.');
-  // Render immediately before reading pixels — the drawing buffer is only
-  // valid in the same task when preserveDrawingBuffer is off.
-  vp.renderer.render(vp.scene, vp.camera);
   const canvas = vp.renderer.domElement;
-  const dataUrl = canvas.toDataURL('image/png');
-  return { dataUrl, width: canvas.width, height: canvas.height };
+  // A hidden or occluded tab can end up with a ~1px drawing buffer (the mount
+  // never got layout). Temporarily render at a sane size so the AI still gets
+  // a usable image, then restore whatever the canvas was.
+  const prevSize: [number, number] | null =
+    canvas.width < 64 || canvas.height < 64 ? [canvas.width, canvas.height] : null;
+  const cam = vp.camera as { aspect?: number };
+  const prevAspect = cam.aspect;
+  if (prevSize) {
+    vp.renderer.setSize(SCREENSHOT_FALLBACK[0], SCREENSHOT_FALLBACK[1]);
+    if (typeof prevAspect === 'number') {
+      cam.aspect = SCREENSHOT_FALLBACK[0] / SCREENSHOT_FALLBACK[1];
+      (cam as { updateProjectionMatrix?: () => void }).updateProjectionMatrix?.();
+    }
+  }
+  try {
+    // Render immediately before reading pixels — the drawing buffer is only
+    // valid in the same task when preserveDrawingBuffer is off.
+    vp.renderer.render(vp.scene, vp.camera);
+    const dataUrl = canvas.toDataURL('image/png');
+    return {
+      dataUrl,
+      width: canvas.width,
+      height: canvas.height,
+      ...(prevSize ? { note: 'viewport was hidden — captured at fallback size' } : {}),
+    };
+  } finally {
+    if (prevSize) {
+      vp.renderer.setSize(Math.max(prevSize[0], 1), Math.max(prevSize[1], 1));
+      if (typeof prevAspect === 'number') {
+        cam.aspect = prevAspect;
+        (cam as { updateProjectionMatrix?: () => void }).updateProjectionMatrix?.();
+      }
+    }
+  }
 }
 
 // --- Dispatcher ---
@@ -601,6 +819,7 @@ const IMPLS: Record<string, ToolImpl> = {
   new_animation: (a) => toolNewAnimation(a as never),
   add_rotation_key: (a) => toolAddRotationKey(a as never),
   add_hips_key: (a) => toolAddHipsKey(a as never),
+  add_expression_key: (a) => toolAddExpressionKey(a as never),
   clear_track: (a) => toolClearTrack(a as never),
   move_key: (a) => toolMoveKey(a as never),
   set_key_ease: (a) => toolSetKeyEase(a as never),
@@ -609,6 +828,8 @@ const IMPLS: Record<string, ToolImpl> = {
   reset_pose: () => toolResetPose(),
   undo: () => useEditor.getState().undo(),
   redo: () => useEditor.getState().redo(),
+  get_motion_video_info: () => toolGetMotionVideoInfo(),
+  extract_motion_from_video: (a) => toolExtractMotion(a as never),
   set_material: (a) => toolSetMaterial(a),
   reset_material: (a) => toolResetMaterial(a as never),
   set_visibility: (a) => toolSetVisibility(a as never),
@@ -635,7 +856,10 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
   if (!impl) return { ok: false, error: `Unknown tool "${name}"` };
   try {
     const result = await impl(args ?? {});
-    return { ok: true, result };
+    // Some tools (undo/redo) return void — normalize so the wire result is
+    // always JSON-able (JSON.stringify(undefined) is undefined, which used to
+    // crash the agent loop when building the tool message).
+    return { ok: true, result: result === undefined ? { done: true } : result };
   } catch (err) {
     const msg = err instanceof ToolError ? err.message : `Tool failed: ${(err as Error)?.message ?? String(err)}`;
     console.warn(`[ai] tool ${name} failed:`, err);

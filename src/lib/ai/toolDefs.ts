@@ -47,7 +47,7 @@ const listAssets = obj(
 );
 
 const listExpressions = obj(
-  'List the model expressions (blendshapes) with current weight (0..1), the weight baked into the file, and any pending edit. Use set_expression to change one.',
+  'List the model expressions (blendshapes) with current weight (0..1), the weight baked into the file, any pending edit, and the number of animation keys. Use set_expression to change the rest face, add_expression_key to animate one.',
   {},
 );
 
@@ -64,7 +64,7 @@ const listOutfits = obj(
 // --- Animation ---
 
 const getAnimation = obj(
-  'Get the full animation as JSON: { name, duration, restHipsY, rotTracks: { bone: [{id, t, q:[x,y,z,w], ease?}] }, hipsTrack: [{id, t, p:[x,y,z], ease?}] }. q is the bone rotation in canonical VRMA space where T-pose = identity [0,0,0,1]; p is the hips position in canonical space (y ≈ restHipsY when standing at rest).',
+  'Get the full animation as JSON: { name, duration, restHipsY, rotTracks: { bone: [{id, t, q:[x,y,z,w], ease?}] }, hipsTrack: [{id, t, p:[x,y,z], ease?}], exprTracks: { expression: [{id, t, w, ease?}] } }. q is the bone rotation in canonical VRMA space where T-pose = identity [0,0,0,1]; p is the hips position in canonical space (y ≈ restHipsY when standing at rest); w is an expression weight 0..1.',
   {},
 );
 
@@ -74,7 +74,7 @@ const setAnimation = obj(
     animation: {
       type: 'object',
       description:
-        'Animation object: { name: string, duration: number, restHipsY: number, rotTracks?: { boneName: [{ t, q:[x,y,z,w], ease? }] }, hipsTrack?: [{ t, p:[x,y,z], ease? }] }',
+        'Animation object: { name: string, duration: number, restHipsY: number, rotTracks?: { boneName: [{ t, euler:[x,y,z] or q:[x,y,z,w], ease? }] }, hipsTrack?: [{ t, p:[x,y,z], ease? }], exprTracks?: { expressionName: [{ t, w: 0..1, ease? }] } }. Prefer euler (canonical degrees, YXZ — same convention as add_rotation_key) over hand-computed quaternions. Expression names come from list_expressions.',
     },
   },
   ['animation'],
@@ -127,16 +127,27 @@ const addHipsKey = obj(
   },
 );
 
+const addExpressionKey = obj(
+  `Add/update an expression (blendshape) keyframe so the face animates on the timeline (e.g. happy 1 at t=0 and happy 0 at t=0.5 for a quick smile). Weight is 0..1; if omitted the key captures the expression's current live weight. If 'time' is given the playhead moves there first (snapped); otherwise keys at the current playhead. For a permanent rest-face change use set_expression instead.`,
+  {
+    name: { type: 'string', description: 'Expression name from list_expressions (e.g. happy, blink, aa)' },
+    weight: { type: 'number', description: '0..1. Omit to key the current live weight.' },
+    time: { type: 'number', description: 'Key time in seconds. Omit to key at the current playhead.' },
+    ease: { type: 'string', description: "Transition curve leaving this key toward the next: 'linear' | 'in' | 'out' | 'inout' | 'step' | 'custom'" },
+  },
+  ['name'],
+);
+
 const clearTrack = obj(
-  "Delete every keyframe of one track. track is a bone name or '__hips__' for the hips position track.",
-  { track: { type: 'string', description: "Bone name or '__hips__'" } },
+  "Delete every keyframe of one track. track is a bone name, '__hips__' for the hips position track, or 'expr:<name>' for an expression track (e.g. 'expr:happy').",
+  { track: { type: 'string', description: "Bone name, '__hips__', or 'expr:<name>'" } },
   ['track'],
 );
 
 const moveKey = obj(
   'Move one keyframe to a new time (snapped). Get ids from get_animation.',
   {
-    track: { type: 'string', description: "Bone name or '__hips__'" },
+    track: { type: 'string', description: "Bone name, '__hips__', or 'expr:<name>'" },
     keyId: { type: 'number', description: 'Key id from get_animation' },
     time: { type: 'number', description: 'New time in seconds' },
   },
@@ -146,7 +157,7 @@ const moveKey = obj(
 const setKeyEase = obj(
   "Set the transition curve of one keyframe. ease: 'linear' | 'in' | 'out' | 'inout' | 'step' | 'custom'. For 'custom' pass bez [x1,y1,x2,y2] (CSS cubic-bezier style).",
   {
-    track: { type: 'string', description: "Bone name or '__hips__'" },
+    track: { type: 'string', description: "Bone name, '__hips__', or 'expr:<name>'" },
     keyId: { type: 'number' },
     ease: { type: 'string' },
     bez: { type: 'array', description: 'Custom bezier handles [x1,y1,x2,y2] when ease=custom', items: { type: 'number' } },
@@ -157,7 +168,7 @@ const setKeyEase = obj(
 const setTrackEase = obj(
   'Apply one transition curve to every keyframe of a track.',
   {
-    track: { type: 'string', description: "Bone name or '__hips__'" },
+    track: { type: 'string', description: "Bone name, '__hips__', or 'expr:<name>'" },
     ease: { type: 'string' },
   },
   ['track', 'ease'],
@@ -181,8 +192,35 @@ const resetPose = obj(
   {},
 );
 
-const undoTool = obj('Undo the last animation edit (one step).', {});
-const redoTool = obj('Redo a previously undone animation edit (one step).', {});
+const undoTool = obj('Undo the last animation or model edit (one step).', {});
+const redoTool = obj('Redo a previously undone animation or model edit (one step).', {});
+
+// --- Motion reference (video) ---
+
+const getMotionVideoInfo = obj(
+  'Get info about the motion-reference video the user loaded with the "Motion video…" toolbar button: file name, duration in seconds, pixel dimensions. Errors with a hint when no video is loaded — in that case just tell the user to load one; there is no way for you to open a video yourself.',
+  {},
+);
+
+const extractMotionFromVideo = obj(
+  'Extract human motion from the loaded motion-reference video as the current animation. Runs in-browser pose tracking (MediaPipe) frame by frame, retargets the tracked person onto the humanoid rig and imports the result as the whole animation (one undo step, starts playing). The video must be loaded first (see get_motion_video_info). Long videos are processed in ≤60s chunks automatically, but keep segments short anyway (start/end) — long spans are slow and the result replaces the timeline. Afterwards review the returned warnings (low coverage, sparse tracks) and refine: set_track_ease smoothing, clear_track for noisy tracks, get_animation/screenshot to inspect. Expect a REFERENCE-quality result: tracking noise, no finger/hand data, hips forward/backward travel is not recoverable from monocular video (vertical bob and lateral sway are).',
+  {
+    fps: {
+      type: 'number',
+      description: 'Sampling rate in frames per second, 5-30 (default 15). Lower is faster and stays smooth via interpolation; use 30 only for fast motion.',
+    },
+    start: { type: 'number', description: 'Segment start in seconds (default 0).' },
+    end: { type: 'number', description: 'Segment end in seconds (default video duration; max span 60s).' },
+    smooth: {
+      type: 'number',
+      description: 'Smoothing window in frames per side, 0-10 (default 2). Higher = smoother but lags fast motion.',
+    },
+    import: {
+      type: 'boolean',
+      description: 'Import the result into the timeline (default true). When false, only a summary is returned.',
+    },
+  },
+);
 
 // --- Model editing ---
 
@@ -216,7 +254,7 @@ const setVisibility = obj(
 );
 
 const setExpression = obj(
-  'Set an expression weight 0..1 (e.g. happy, angry, aa, blink). Previews immediately; baked into the model on save.',
+  'Set a static expression weight 0..1 (e.g. happy, angry, aa, blink) — the rest face, applied immediately and baked into the model on save. To animate an expression over time on the timeline, use add_expression_key instead.',
   {
     name: { type: 'string', description: 'Expression name from list_expressions' },
     weight: { type: 'number', description: '0..1' },
@@ -296,6 +334,7 @@ export const TOOL_DEFS: ToolDef[] = [
   named(newAnimation, 'new_animation'),
   named(addRotationKey, 'add_rotation_key'),
   named(addHipsKey, 'add_hips_key'),
+  named(addExpressionKey, 'add_expression_key'),
   named(clearTrack, 'clear_track'),
   named(moveKey, 'move_key'),
   named(setKeyEase, 'set_key_ease'),
@@ -304,6 +343,8 @@ export const TOOL_DEFS: ToolDef[] = [
   named(resetPose, 'reset_pose'),
   named(undoTool, 'undo'),
   named(redoTool, 'redo'),
+  named(getMotionVideoInfo, 'get_motion_video_info'),
+  named(extractMotionFromVideo, 'extract_motion_from_video'),
   named(setMaterial, 'set_material'),
   named(resetMaterial, 'reset_material'),
   named(setVisibility, 'set_visibility'),

@@ -7,6 +7,7 @@ import {
   Download,
   FilePlus2,
   FileInput,
+  Film,
   FolderOpen,
   FolderSearch,
   PanelLeft,
@@ -14,7 +15,10 @@ import {
   Redo2,
   Save,
   Sparkles,
+  Sun,
+  Moon,
   Undo2,
+  X,
 } from 'lucide-react';
 import { useEditor, makeSampleData, countModelEdits } from '../store';
 import { parseVRMA } from '../lib/vrma/parse';
@@ -30,9 +34,12 @@ export function Toolbar() {
   const showSkeleton = useEditor((s) => s.showSkeleton);
   const modelLibrary = useEditor((s) => s.modelLibrary);
   const modelUrl = useEditor((s) => s.modelUrl);
+  const motionVideoName = useEditor((s) => s.motionVideoName);
+  const theme = useEditor((s) => s.theme);
   const editCount = useEditor((s) => countModelEdits(s.modelEdits));
   const modelInputRef = useRef<HTMLInputElement>(null);
   const vrmaInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
   const [exporting, setExporting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modelsOpen, setModelsOpen] = useState(false);
@@ -67,6 +74,22 @@ export function Toolbar() {
     useEditor.getState().setModelUrl(url, file.name);
   };
 
+  const openMotionVideo = (file: File) => {
+    const url = URL.createObjectURL(file);
+    const prev = useEditor.getState().motionVideoUrl;
+    if (prev) URL.revokeObjectURL(prev);
+    useEditor.getState().setMotionVideo(url, file.name);
+    useEditor
+      .getState()
+      .setStatus('ok', `Motion video "${file.name}" loaded — open the Motion tab to track it into an animation`);
+  };
+
+  const clearMotionVideo = () => {
+    const prev = useEditor.getState().motionVideoUrl;
+    if (prev) URL.revokeObjectURL(prev);
+    useEditor.getState().setMotionVideo(null, null);
+  };
+
   const importVRMA = async (file: File) => {
     try {
       const data = parseVRMA(await file.arrayBuffer());
@@ -83,7 +106,9 @@ export function Toolbar() {
   const exportVRMA = () => {
     const st = useEditor.getState();
     const keyCount =
-      Object.values(st.rotTracks).reduce((n, k) => n + (k?.length ?? 0), 0) + st.hipsTrack.length;
+      Object.values(st.rotTracks).reduce((n, k) => n + (k?.length ?? 0), 0) +
+      st.hipsTrack.length +
+      Object.values(st.exprTracks).reduce((n, k) => n + k.length, 0);
     if (keyCount === 0) {
       st.setStatus('info', 'Nothing to export — add some keyframes first');
       return;
@@ -221,6 +246,37 @@ export function Toolbar() {
       <div className="vsep" />
 
       <button
+        className={`btn ${motionVideoName ? 'active' : ''}`}
+        onClick={() => videoInputRef.current?.click()}
+        title={
+          motionVideoName
+            ? `Motion reference video: ${motionVideoName} — click to replace`
+            : 'Load a motion-reference video — the AI can extract the person\u2019s motion from it'
+        }
+      >
+        <Film size={14} /> Motion video
+      </button>
+      <input
+        ref={videoInputRef}
+        type="file"
+        accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov"
+        hidden
+        onChange={(e) => e.target.files?.[0] && openMotionVideo(e.target.files[0])}
+      />
+      {motionVideoName && (
+        <>
+          <span className="model-name" title={motionVideoName}>
+            {motionVideoName}
+          </span>
+          <button className="btn icon" onClick={clearMotionVideo} title="Remove the motion reference video">
+            <X size={13} />
+          </button>
+        </>
+      )}
+
+      <div className="vsep" />
+
+      <button
         className={`btn ${editCount > 0 ? 'accent' : ''}`}
         onClick={saveModel}
         disabled={saving || !modelUrl || editCount === 0}
@@ -270,6 +326,14 @@ export function Toolbar() {
         onClick={() => useEditor.getState().setRightOpen(!rightOpen)}
       >
         <PanelRight size={15} />
+      </button>
+
+      <button
+        className="btn icon"
+        title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        onClick={() => useEditor.getState().setTheme(theme === 'dark' ? 'light' : 'dark')}
+      >
+        {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
       </button>
 
       <button

@@ -107,6 +107,17 @@ export function resetMaterialLive(vrm: VRM, matName: string): void {
   }
 }
 
+/** Restore only a material's original base texture (undo of a texture replacement). */
+export function restoreMaterialTexture(vrm: VRM, matName: string): void {
+  for (const m of materialsFor(vrm, matName)) {
+    const snap = MAT_SNAPSHOTS.get(m);
+    const mapMat = asMapMat(m);
+    if (!snap || !mapMat || mapMat.map === snap.map) continue;
+    mapMat.map = snap.map;
+    m.needsUpdate = true;
+  }
+}
+
 /** Apply one material's edit patch to the live materials. */
 export function applyMaterialEdit(vrm: VRM, matName: string, edit: MaterialEdit): void {
   for (const m of materialsFor(vrm, matName)) {
@@ -319,4 +330,36 @@ export function applyAllEdits(vrm: VRM, edits: ModelEdits): void {
     }
   }
   applyAllBoneScales(vrm, edits.boneScale);
+}
+
+/**
+ * Re-apply a restored ModelEdits to the live model after undo/redo. The bulk
+ * goes through applyAllEdits — but that is idempotent on top of the file's
+ * rest state, not self-resetting, so materials touched by the state being
+ * left are reset to their snapshot first (visibility, expressions and bone
+ * scale already reset themselves inside applyAllEdits). Texture replacements
+ * are synced separately because they come from Files: one present in the
+ * restored state is re-applied only when the live texture isn't already it
+ * (matched by file name), and one that disappeared on restore puts the
+ * original texture back.
+ */
+export function syncModelEdits(vrm: VRM, restored: ModelEdits, previous: ModelEdits): void {
+  const touched = new Set([...Object.keys(previous.materials), ...Object.keys(restored.materials)]);
+  for (const name of touched) resetMaterialLive(vrm, name);
+  applyAllEdits(vrm, restored);
+  const prevReplaced = new Set(
+    Object.entries(previous.materials)
+      .filter(([, e]) => e.textureFile)
+      .map(([n]) => n),
+  );
+  for (const name of new Set([...prevReplaced, ...Object.keys(restored.materials)])) {
+    const edit = restored.materials[name];
+    if (edit?.textureFile) {
+      const map = materialsFor(vrm, name)[0] as MapMat | undefined;
+      if (map?.map && map.map.name === edit.textureName) continue;
+      void applyTextureReplacement(vrm, name, edit.textureFile);
+    } else if (prevReplaced.has(name)) {
+      restoreMaterialTexture(vrm, name);
+    }
+  }
 }

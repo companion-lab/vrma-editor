@@ -5,6 +5,7 @@
 
 import { useEffect, useRef } from 'react';
 import { evalCubicBezier, DEFAULT_BEZ, type Bez } from '../lib/vrma/parse';
+import { useEditor } from '../store';
 
 const W = 208; // css px
 const H = 122;
@@ -37,9 +38,10 @@ interface EaseCurveProps {
 export function EaseCurve({ bez, strokeStart, onChange }: EaseCurveProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<0 | 1 | null>(null);
+  const theme = useEditor((s) => s.theme);
   const b = bez ?? DEFAULT_BEZ;
 
-  // redraw on every curve change
+  // redraw on every curve change (and on theme switch — colors come from CSS vars)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -101,7 +103,7 @@ export function EaseCurve({ bez, strokeStart, onChange }: EaseCurveProps) {
       ctx.strokeStyle = c.border;
       ctx.stroke();
     }
-  }, [b]);
+  }, [b, theme]);
 
   // pointer → curve coords (x clamped to 0..1, y to the drawable window)
   const toCurve = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {

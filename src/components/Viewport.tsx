@@ -5,8 +5,9 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import { useEditor } from '../store';
-import { applyPose, clearManipulated, getNormNode } from '../lib/animation';
-import { SkeletonOverlay } from '../lib/skeleton';
+import { applyExpressions, applyPose, clearManipulated, getNormNode } from '../lib/animation';
+import { liveTracker } from '../lib/mocap/live';
+import { SkeletonOverlay, setSkeletonTheme } from '../lib/skeleton';
 import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
 import { applyAllEdits, collectMaterials, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
@@ -16,6 +17,7 @@ import { registerViewport } from '../lib/ai/sceneRef';
 export function Viewport() {
   const mountRef = useRef<HTMLDivElement>(null);
   const modelUrl = useEditor((s) => s.modelUrl);
+  const theme = useEditor((s) => s.theme);
 
   // --- scene bootstrap (once) ---
   const sceneRef = useRef<{
@@ -26,6 +28,7 @@ export function Viewport() {
     gizmo: TransformControls;
     gizmoHelper: THREE.Object3D;
     vrmRoot: THREE.Group;
+    grid: THREE.GridHelper;
     clock: THREE.Clock;
     overlay: SkeletonOverlay;
   } | null>(null);
@@ -84,10 +87,10 @@ export function Viewport() {
     scene.add(overlay.group);
 
     const clock = new THREE.Clock();
-    sceneRef.current = { scene, camera, renderer, orbit, gizmo, gizmoHelper, vrmRoot, clock, overlay };
+    sceneRef.current = { scene, camera, renderer, orbit, gizmo, gizmoHelper, vrmRoot, grid, clock, overlay };
     registerViewport({ renderer, scene, camera }); // for AI tools (screenshot)
     if (import.meta.env.DEV) {
-      (window as any).__vp = { scene, camera, renderer, vrmRoot, grid, overlay };
+      (window as any).__vp = { scene, camera, renderer, vrmRoot, grid, overlay, store: useEditor };
     }
 
     // --- render / playback loop ---
@@ -113,7 +116,15 @@ export function Viewport() {
           }
           st.setTime(t);
         }
-        applyPose(vrm, st.getAnimData(), st.time, st.restHipsPos, st.animRestHipsY);
+        const anim = st.getAnimData();
+        if (liveTracker.active) {
+          // Realtime tracking owns the rig: write the live pose instead of
+          // sampling the timeline (stopping the session reverts instantly).
+          liveTracker.applyTo(vrm, st.restHipsPos);
+        } else {
+          applyPose(vrm, anim, st.time, st.restHipsPos, st.animRestHipsY);
+          applyExpressions(vrm, anim, st.time);
+        }
         vrm.update(dt);
       }
       overlay.update(st);
@@ -187,6 +198,24 @@ export function Viewport() {
       sceneRef.current = null;
     };
   }, []);
+
+  // --- viewport follows the UI theme ---
+  useEffect(() => {
+    const vp = sceneRef.current;
+    if (!vp) return;
+    const light = theme === 'light';
+    vp.scene.background = new THREE.Color(light ? 0xe9ebf1 : 0x0d0e13);
+    // GridHelper bakes its line colors into vertex colors, so the grid is
+    // rebuilt rather than recolored.
+    const grid = new THREE.GridHelper(10, 20, light ? 0xb6bac6 : 0x3a3d4a, light ? 0xd6d9e2 : 0x23252e);
+    (grid.material as THREE.Material).transparent = true;
+    (grid.material as THREE.Material).opacity = 0.6;
+    vp.scene.remove(vp.grid);
+    vp.grid.dispose();
+    vp.scene.add(grid);
+    vp.grid = grid;
+    setSkeletonTheme(light);
+  }, [theme]);
 
   // --- gizmo wiring ---
   useEffect(() => {

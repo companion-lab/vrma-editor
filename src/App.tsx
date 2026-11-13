@@ -9,6 +9,13 @@ import { useEditor } from './store';
 export default function App() {
   const leftOpen = useEditor((s) => s.leftOpen);
   const rightOpen = useEditor((s) => s.rightOpen);
+  const theme = useEditor((s) => s.theme);
+
+  // The theme lives on <html> so CSS vars + color-scheme apply everywhere,
+  // including canvas widgets that read getComputedStyle.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   // Confirm before refresh/close when there are keyframes to lose.
   // Browsers only allow their native dialog on unload — a custom modal
@@ -18,7 +25,8 @@ export default function App() {
       const st = useEditor.getState();
       const hasWork =
         Object.values(st.rotTracks).some((k) => (k?.length ?? 0) > 0) ||
-        st.hipsTrack.length > 0;
+        st.hipsTrack.length > 0 ||
+        Object.values(st.exprTracks).some((k) => k.length > 0);
       if (!hasWork) return;
       e.preventDefault();
       e.returnValue = ''; // required by Chrome/Edge to show the dialog

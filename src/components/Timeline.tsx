@@ -13,9 +13,9 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { HIPS_TRACK_ID, useEditor } from '../store';
+import { HIPS_TRACK_ID, exprNameOf, exprTrackId, isExprTrack, useEditor } from '../store';
 import { BONE_ORDER_INDEX, prettyBoneName } from '../lib/humanoid';
-import type { PosKey, RotKey } from '../lib/vrma/parse';
+import type { ExprKey, PosKey, RotKey } from '../lib/vrma/parse';
 
 const LABEL_W = 150;
 const SUMMARY_ID = '__summary__';
@@ -35,10 +35,60 @@ interface RowInfo {
   track: string;
   label: string;
   isHipsPos: boolean;
-  keys: (RotKey | PosKey)[];
+  isExpr: boolean;
+  keys: (RotKey | PosKey | ExprKey)[];
   totalRows: number;
   /** Display-only row (the "All tracks" summary): no key interactions. */
   passive?: boolean;
+}
+
+/** Key times captured when a group drag starts — every pointer move sets
+ *  absolute snapshot.t + delta, so the block follows the cursor 1:1. */
+type KeySnapshot = { track: string; id: number; t: number };
+
+/** The keys of one track id (bone, hips sentinel or expr:<name>). */
+function trackKeys(
+  s: {
+    rotTracks: Partial<Record<string, (RotKey | PosKey)[]>>;
+    hipsTrack: PosKey[];
+    exprTracks: Record<string, ExprKey[]>;
+  },
+  track: string,
+): (RotKey | PosKey | ExprKey)[] | undefined {
+  return track === HIPS_TRACK_ID
+    ? s.hipsTrack
+    : isExprTrack(track)
+      ? s.exprTracks[exprNameOf(track)]
+      : s.rotTracks[track];
+}
+
+function snapshotSelectedKeys(s: {
+  selectedKeys: { track: string; id: number }[];
+  rotTracks: Partial<Record<string, (RotKey | PosKey)[]>>;
+  hipsTrack: PosKey[];
+  exprTracks: Record<string, ExprKey[]>;
+}): KeySnapshot[] {
+  return s.selectedKeys.map((r) => {
+    const k = trackKeys(s, r.track)?.find((q) => q.id === r.id);
+    return { track: r.track, id: r.id, t: k?.t ?? 0 };
+  });
+}
+
+function snapshotTracks(
+  s: {
+    rotTracks: Partial<Record<string, (RotKey | PosKey)[]>>;
+    hipsTrack: PosKey[];
+    exprTracks: Record<string, ExprKey[]>;
+  },
+  tracks: string[],
+): KeySnapshot[] {
+  return tracks.flatMap((tr) =>
+    (trackKeys(s, tr) ?? []).map((k) => ({
+      track: tr,
+      id: k.id,
+      t: k.t,
+    })),
+  );
 }
 
 // One timeline row. Memoized so per-frame time updates don't re-diff the
@@ -92,7 +142,7 @@ const TrackRow = memo(function TrackRow({
   // The gap is at least a diamond's width + air so keys never touch; it only
   // grows past that when many rows would otherwise blow the node budget.
   const minGap = Math.max(13, (row.totalRows * width) / 3000);
-  const shown: (RotKey | PosKey)[] = [];
+  const shown: (RotKey | PosKey | ExprKey)[] = [];
   let lastX = -1e9;
   for (const k of keys) {
     const x = k.t * pps;
@@ -116,15 +166,19 @@ const TrackRow = memo(function TrackRow({
   const spanW = x1 - x0;
 
   return (
-    <div className={`tl-row${labelSelected && !passive ? ' sel' : ''}`}>
+    <div className={`tl-row${labelSelected && !passive ? ' sel' : ''}`} data-row={row.track}>
       <div
         className={`tl-label${passive ? '' : ' clickable'}${labelSelected && !passive ? ' selected' : ''}`}
         title={
           passive
-            ? `All ${keys.length} keys across every track — click the lane to scrub · Alt+drag: box-select keys`
-            : dense
-              ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag the track's bar: move it in time (selected tracks move together)\nAlt+drag the lane: box-select keys in a time range\nRight-click: remove all its keys`
-              : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag the track's bar: move it in time (selected tracks move together)\nAlt+drag the lane: box-select keys in a time range\nRight-click: remove all its keys`
+            ? `All ${keys.length} keys across every track — click the lane to scrub · Alt+drag: select a time band across all tracks`
+            : row.isExpr
+              ? dense
+                ? `Expression "${row.label}" — ${keys.length} keys (showing a sampled subset)\nDrag on the lane: box-select keys · Alt+drag the bar: move the whole track in time\nRight-click the label: remove the whole track`
+                : `Expression "${row.label}"\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+click keys: multi-select\nAlt+drag the bar: move the whole track in time\nRight-click the label: remove the whole track`
+              : dense
+                ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click: remove all its keys`
+                : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click: remove all its keys`
         }
         onClick={passive ? undefined : (e) => onLabelClick(e, row.track)}
         onContextMenu={passive ? undefined : (e) => onLabelContext(e, row.track)}
@@ -135,6 +189,7 @@ const TrackRow = memo(function TrackRow({
       <div
         className="tl-track"
         style={{ width }}
+        data-lane={passive ? undefined : row.track}
         onPointerDown={onScrubDown}
         onPointerMove={onScrubMove}
         onPointerUp={onScrubUp}
@@ -148,7 +203,7 @@ const TrackRow = memo(function TrackRow({
             title={
               passive
                 ? undefined
-                : `${row.label} — drag the bar to move the whole track in time${
+                : `${row.label} — Alt+drag the bar to move the whole track in time${
                     labelSelected ? ' (moves every selected track together)' : ''
                   }`
             }
@@ -162,12 +217,13 @@ const TrackRow = memo(function TrackRow({
           const selected =
             !passive && (selectedId === k.id || keySelSet.has(`${row.track}:${k.id}`));
           const easeClass = k.ease && k.ease !== 'linear' ? ` ease-${k.ease}` : '';
+          const weight = row.isExpr && 'w' in k ? ` · w=${(k as ExprKey).w.toFixed(2)}` : '';
           return (
             <div
               key={passive ? i : k.id}
               className={`diamond${passive ? ' ghost' : ''}${easeClass}${selected ? ' selected' : ''}`}
               style={{ left: k.t * pps }}
-              title={`${k.t.toFixed(2)}s${dense ? ` · 1 of ${keys.length} keys` : k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — Alt+click: select all keys at this time · Ctrl/Cmd+click: add to selection · drag to move · right-click: delete'}`}
+              title={`${k.t.toFixed(2)}s${weight}${dense ? ` · 1 of ${keys.length} keys` : !row.isExpr && k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — Alt+click: select all keys at this time · Ctrl/Cmd+click: add to selection · drag to move · right-click: delete'}`}
               onPointerDown={passive ? undefined : (e) => onDiamondDown(e, row.track, k.id, row.isHipsPos)}
               onPointerMove={passive ? undefined : onDiamondMove}
               onPointerUp={passive ? undefined : onDiamondUp}
@@ -197,6 +253,7 @@ export function Timeline() {
   const snap = useEditor((s) => s.snap);
   const rotTracks = useEditor((s) => s.rotTracks);
   const hipsTrack = useEditor((s) => s.hipsTrack);
+  const exprTracks = useEditor((s) => s.exprTracks);
   const selectedKey = useEditor((s) => s.selectedKey);
   const selectedKeys = useEditor((s) => s.selectedKeys);
   const selectedBones = useEditor((s) => s.selectedBones);
@@ -233,30 +290,39 @@ export function Timeline() {
     setPpsState(v);
   };
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const rulerTrackRef = useRef<HTMLDivElement>(null);
 
   const rows = useMemo<RowInfo[]>(() => {
     const bones = Object.keys(rotTracks)
       .filter((b) => (rotTracks[b]?.length ?? 0) > 0)
       .sort((a, b) => (BONE_ORDER_INDEX[a] ?? 999) - (BONE_ORDER_INDEX[b] ?? 999));
-    const totalRows = bones.length + (hipsTrack.length > 0 ? 1 : 0);
+    const exprNames = Object.keys(exprTracks)
+      .filter((n) => (exprTracks[n]?.length ?? 0) > 0)
+      .sort((a, b) => a.localeCompare(b));
+    const totalRows = bones.length + (hipsTrack.length > 0 ? 1 : 0) + exprNames.length;
     const out: RowInfo[] = bones.map((b) => ({
       track: b,
       label: prettyBoneName(b),
       isHipsPos: false,
+      isExpr: false,
       keys: rotTracks[b]!,
       totalRows,
     }));
     if (hipsTrack.length > 0) {
-      out.push({ track: HIPS_TRACK_ID, label: 'Hips position', isHipsPos: true, keys: hipsTrack, totalRows });
+      out.push({ track: HIPS_TRACK_ID, label: 'Hips position', isHipsPos: true, isExpr: false, keys: hipsTrack, totalRows });
+    }
+    // Expression rows after the bones, alphabetical (no bone order to follow).
+    for (const n of exprNames) {
+      out.push({ track: exprTrackId(n), label: n, isHipsPos: false, isExpr: true, keys: exprTracks[n]!, totalRows });
     }
     return out;
-  }, [rotTracks, hipsTrack]);
+  }, [rotTracks, hipsTrack, exprTracks]);
 
   // "All tracks" overview: every key time across the animation, merged.
   // Display-only — it shows where motion happens at a glance and scrubs.
   const summaryRow = useMemo<RowInfo | null>(() => {
-    const merged: (RotKey | PosKey)[] = [];
+    const merged: (RotKey | PosKey | ExprKey)[] = [];
     for (const row of rows) merged.push(...row.keys);
     if (merged.length === 0) return null;
     merged.sort((a, b) => a.t - b.t);
@@ -264,6 +330,7 @@ export function Timeline() {
       track: SUMMARY_ID,
       label: 'All tracks',
       isHipsPos: false,
+      isExpr: false,
       keys: merged,
       totalRows: rows.length + 1,
       passive: true,
@@ -326,41 +393,151 @@ export function Timeline() {
   }, []);
 
   // Scrub: pointerdown anywhere on a track background / ruler / playhead cap.
-  // With Alt held it becomes a box selection: sweep a time window across all
-  // tracks and every key inside it gets selected (a plain Alt+click selects
-  // the keys around that instant — "all motion at 0.8s").
-  const onScrubDown = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    const s = st.getState();
-    s.setPlaying(false);
-    if (e.altKey) {
-      e.preventDefault();
-      const t = timeFromEvent(e.clientX);
-      marqueeRef.current = { t0: t, t1: t };
-      setMarquee({ t0: t, t1: t });
-      return;
-    }
-    s.setTime(s.snapTime(timeFromEvent(e.clientX)));
-  }, [st, timeFromEvent]);
-  const onScrubMove = useCallback((e: React.PointerEvent) => {
-    if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
-    if (marqueeRef.current) {
-      const band = { t0: marqueeRef.current.t0, t1: timeFromEvent(e.clientX) };
-      marqueeRef.current = band;
-      setMarquee(band);
-      return;
-    }
-    const s = st.getState();
-    s.setTime(s.snapTime(timeFromEvent(e.clientX)));
-  }, [st, timeFromEvent]);
-  const onScrubUp = useCallback(() => {
-    const band = marqueeRef.current;
-    if (!band) return;
-    marqueeRef.current = null;
-    setMarquee(null);
-    st.getState().selectKeysInRange(band.t0, band.t1);
-  }, [st]);
+  //
+  // On a keyframe lane, a press is ambiguous until the pointer moves:
+  //   click (no drag)   → scrub the playhead there + clear the key selection
+  //                       (like clicking empty space in a file explorer)
+  //   drag              → Explorer-style 2D box selection: a rectangle whose
+  //                       rows × time span select every key diamond it crosses
+  //   Ctrl/Cmd + drag   → the box adds to the existing selection
+  //   Alt + drag        → time-band box across ALL tracks (column select)
+  // The ruler and the playhead cap keep pure scrubbing.
+  interface LaneGeom {
+    track: string;
+    top: number;
+    bottom: number;
+    left: number;
+  }
+  const dragSelectRef = useRef<{
+    lanes: LaneGeom[];
+    x0: number;
+    y0: number;
+    additive: boolean;
+    active: boolean;
+  } | null>(null);
+  const [rectSelect, setRectSelect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+
+  const onScrubDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // Some environments (synthetic events, stale pointer ids) throw — the
+        // drag then works window-wide via the button-held move guard instead.
+      }
+      const s = st.getState();
+      s.setPlaying(false);
+      if (e.altKey) {
+        e.preventDefault();
+        const t = timeFromEvent(e.clientX);
+        marqueeRef.current = { t0: t, t1: t };
+        setMarquee({ t0: t, t1: t });
+        return;
+      }
+      if ((e.currentTarget as HTMLElement).dataset.lane != null) {
+        // Potential drag selection: capture every lane's geometry up front so
+        // the rectangle can sweep across rows while the pointer stays
+        // captured by the lane it started on.
+        e.preventDefault();
+        const lanes: LaneGeom[] = [];
+        scrollRef.current?.querySelectorAll<HTMLElement>('.tl-track[data-lane]').forEach((el) => {
+          const r = el.getBoundingClientRect();
+          lanes.push({ track: el.dataset.lane!, top: r.top, bottom: r.bottom, left: r.left });
+        });
+        dragSelectRef.current = {
+          lanes,
+          x0: e.clientX,
+          y0: e.clientY,
+          additive: e.ctrlKey || e.metaKey,
+          active: false,
+        };
+        return;
+      }
+      s.setTime(s.snapTime(timeFromEvent(e.clientX)));
+    },
+    [st, timeFromEvent],
+  );
+  const onScrubMove = useCallback(
+    (e: React.PointerEvent) => {
+      const el = e.currentTarget as HTMLElement;
+      if (!el.hasPointerCapture?.(e.pointerId)) {
+        // Capture unavailable (synthetic events, capture failure): an active
+        // drag still follows button-held moves, hovers stay ignored.
+        if (!dragSelectRef.current && !marqueeRef.current) return;
+        if (!(e.buttons & 1)) return;
+      }
+      const g = dragSelectRef.current;
+      if (g) {
+        if (!g.active) {
+          if (Math.abs(e.clientX - g.x0) < 4 && Math.abs(e.clientY - g.y0) < 4) return;
+          g.active = true;
+        }
+        const s = st.getState();
+        const minX = Math.min(g.x0, e.clientX);
+        const maxX = Math.max(g.x0, e.clientX);
+        const minY = Math.min(g.y0, e.clientY);
+        const maxY = Math.max(g.y0, e.clientY);
+        const refs: { track: string; id: number }[] = [];
+        for (const lane of g.lanes) {
+          if (lane.bottom < minY || lane.top > maxY) continue;
+          const keys = trackKeys(s, lane.track);
+          for (const k of keys ?? []) {
+            const kx = lane.left + k.t * ppsRef.current;
+            if (kx >= minX - 5 && kx <= maxX + 5) refs.push({ track: lane.track, id: k.id });
+          }
+        }
+        s.selectKeys(refs, g.additive ? 'add' : 'replace');
+        const content = contentRef.current;
+        if (content) {
+          const cr = content.getBoundingClientRect();
+          setRectSelect({
+            left: minX - cr.left,
+            top: minY - cr.top,
+            width: maxX - minX,
+            height: maxY - minY,
+          });
+        }
+        return;
+      }
+      if (marqueeRef.current) {
+        const band = { t0: marqueeRef.current.t0, t1: timeFromEvent(e.clientX) };
+        marqueeRef.current = band;
+        setMarquee(band);
+        return;
+      }
+      const s = st.getState();
+      s.setTime(s.snapTime(timeFromEvent(e.clientX)));
+    },
+    [st, timeFromEvent],
+  );
+  const onScrubUp = useCallback(
+    (e: React.PointerEvent) => {
+      const g = dragSelectRef.current;
+      if (g) {
+        dragSelectRef.current = null;
+        setRectSelect(null);
+        if (!g.active) {
+          // Plain click on empty lane: scrub + clear the selection.
+          const s = st.getState();
+          s.setTime(s.snapTime(timeFromEvent(e.clientX)));
+          s.clearKeySelection();
+        }
+        return;
+      }
+      const band = marqueeRef.current;
+      if (!band) return;
+      marqueeRef.current = null;
+      setMarquee(null);
+      st.getState().selectKeysInRange(band.t0, band.t1);
+    },
+    [st, timeFromEvent],
+  );
 
   // Drag a keyframe diamond. Grab order of precedence:
   //   Alt+click        → select the whole column of keys at that time, and
@@ -371,19 +548,22 @@ export function Timeline() {
   //   otherwise        → move just this key.
   const dragRef = useRef<
     | { kind: 'key'; track: string; id: number }
-    | { kind: 'keys'; t0: number }
-    | { kind: 'tracks'; tracks: string[]; t0: number }
+    | { kind: 'group'; snapshot: KeySnapshot[]; t0: number }
     | null
   >(null);
   const onDiamondDown = useCallback(
     (e: React.PointerEvent, track: string, id: number, isHipsPos: boolean) => {
       e.stopPropagation();
       if (e.button === 2) return;
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // synthetic / stale pointer id — the drag still works via button-held moves
+      }
       const s = st.getState();
       s.setPlaying(false);
-      const bone = track === HIPS_TRACK_ID ? 'hips' : track;
-      const keys = track === HIPS_TRACK_ID ? s.hipsTrack : s.rotTracks[track];
+      const bone = isExprTrack(track) ? null : track === HIPS_TRACK_ID ? 'hips' : track;
+      const keys = trackKeys(s, track);
       const key = keys?.find((k) => k.id === id);
       const t0 = s.snapTime(key?.t ?? s.time);
       const inKeySel = s.selectedKeys.length > 1 && s.selectedKeys.some((r) => r.track === track && r.id === id);
@@ -393,7 +573,7 @@ export function Timeline() {
         // drag continues as a column move.
         s.pushHistory();
         s.selectKeysInRange(key.t, key.t);
-        dragRef.current = { kind: 'keys', t0 };
+        dragRef.current = { kind: 'group', snapshot: snapshotSelectedKeys(st.getState()), t0 };
       } else if (e.altKey) {
         dragRef.current = null;
       } else if (e.ctrlKey || e.metaKey) {
@@ -401,19 +581,21 @@ export function Timeline() {
         dragRef.current = null;
       } else if (inKeySel) {
         s.pushHistory();
-        dragRef.current = { kind: 'keys', t0 };
+        dragRef.current = { kind: 'group', snapshot: snapshotSelectedKeys(s), t0 };
       } else {
         const tracks =
-          s.selectedBones.length > 1 && s.selectedBones.includes(bone)
+          bone != null && s.selectedBones.length > 1 && s.selectedBones.includes(bone)
             ? s.selectedBones.flatMap((b) => (b === 'hips' ? ['hips', HIPS_TRACK_ID] : [b]))
             : null;
         s.pushHistory();
         s.selectKey(track, id);
         // Grabbing a selected track keeps the multi-selection (so the drag
         // moves every highlighted row); otherwise this bone becomes the
-        // selection, like a label click.
-        if (!isHipsPos && !tracks) s.selectBone(bone);
-        dragRef.current = tracks ? { kind: 'tracks', tracks, t0 } : { kind: 'key', track, id };
+        // selection, like a label click. Expression tracks have no bone.
+        if (bone != null && !isHipsPos && !tracks) s.selectBone(bone);
+        dragRef.current = tracks
+          ? { kind: 'group', snapshot: snapshotTracks(s, tracks), t0 }
+          : { kind: 'key', track, id };
       }
     },
     [st],
@@ -423,10 +605,8 @@ export function Timeline() {
       const drag = dragRef.current;
       if (!drag) return;
       const s = st.getState();
-      if (drag.kind === 'keys') {
-        s.moveSelectedKeys(s.snapTime(timeFromEvent(e.clientX)) - drag.t0);
-      } else if (drag.kind === 'tracks') {
-        s.moveTracks(drag.tracks, s.snapTime(timeFromEvent(e.clientX)) - drag.t0);
+      if (drag.kind === 'group') {
+        s.moveKeySnapshot(drag.snapshot, s.snapTime(timeFromEvent(e.clientX)) - drag.t0);
       } else {
         s.moveKey(drag.track, drag.id, timeFromEvent(e.clientX));
       }
@@ -447,8 +627,10 @@ export function Timeline() {
 
   // Row label = the bone of that track. Click selects the bone (with the
   // same modifiers as the bone tree); right-click removes its whole track.
+  // Expression tracks have no bone — clicking their label does nothing.
   const onLabelClick = useCallback(
     (e: React.MouseEvent, track: string) => {
+      if (isExprTrack(track)) return;
       const bone = track === HIPS_TRACK_ID ? 'hips' : track;
       const s = st.getState();
       if (e.shiftKey) s.selectBoneRange(bone);
@@ -466,17 +648,32 @@ export function Timeline() {
   );
 
   // Drag a whole track by its span bar (the bar between its first and last
-  // key). Grabbing a track that is part of a multi-selection keeps the
-  // selection and moves every highlighted track together; otherwise the grab
-  // selects the track first (same modifiers as the label click).
-  const spanDragRef = useRef<{ anchorT: number; tracks: string[] } | null>(null);
+  // key) — Alt+drag, so the default lane drag stays a key box-selection.
+  // Grabbing a track that is part of a multi-selection keeps the selection
+  // and moves every highlighted track together; otherwise the grab selects
+  // the track first (same modifiers as the label click).
+  const spanDragRef = useRef<{ anchorT: number; snapshot: KeySnapshot[] } | null>(null);
   const onSpanDown = useCallback(
     (e: React.PointerEvent, track: string, isHipsPos: boolean) => {
       if (e.button !== 0) return;
+      if (!e.altKey) return; // no modifier: the lane's box-selection handles it
       e.stopPropagation();
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {
+        // synthetic / stale pointer id
+      }
       const s = st.getState();
       s.setPlaying(false);
+      // Expression tracks have no bone selection — the drag moves just them.
+      if (isExprTrack(track)) {
+        spanDragRef.current = {
+          anchorT: timeFromEvent(e.clientX),
+          snapshot: snapshotTracks(s, [track]),
+        };
+        st.getState().pushHistory();
+        return;
+      }
       const bone = isHipsPos || track === HIPS_TRACK_ID ? 'hips' : track;
       const inMulti = s.selectedBones.length > 1 && s.selectedBones.includes(bone);
       if (!inMulti) {
@@ -489,7 +686,10 @@ export function Timeline() {
       const tracks = st
         .getState()
         .selectedBones.flatMap((b) => (b === 'hips' ? ['hips', HIPS_TRACK_ID] : [b]));
-      spanDragRef.current = { anchorT: timeFromEvent(e.clientX), tracks };
+      spanDragRef.current = {
+        anchorT: timeFromEvent(e.clientX),
+        snapshot: snapshotTracks(st.getState(), tracks),
+      };
       st.getState().pushHistory();
     },
     [st, timeFromEvent],
@@ -503,7 +703,7 @@ export function Timeline() {
       // Snap the shift (not the key times) so a track keeps its shape and
       // moves in whole snap steps.
       const dt = s.snap > 0 ? Math.round(rawDt / s.snap) * s.snap : rawDt;
-      s.moveTracks(drag.tracks, dt);
+      s.moveKeySnapshot(drag.snapshot, dt);
     },
     [st, timeFromEvent],
   );
@@ -646,7 +846,7 @@ export function Timeline() {
       </div>
 
       <div className="tl-scroll" ref={scrollRef}>
-        <div className="tl-content" style={{ width: LABEL_W + contentW }}>
+        <div className="tl-content" ref={contentRef} style={{ width: LABEL_W + contentW }}>
           {/* alternating per-second bands */}
           <div className="tl-bands" style={{ left: LABEL_W, width: contentW }}>
             {secondBands.map((t) => (
@@ -708,9 +908,11 @@ export function Timeline() {
               selectedId={selectedKey?.track === row.track ? selectedKey.id : null}
               keySelSet={keySelSet}
               labelSelected={
-                row.track === HIPS_TRACK_ID
-                  ? selectedBones.includes('hips')
-                  : selectedBones.includes(row.track)
+                row.isExpr
+                  ? selectedKey?.track === row.track
+                  : row.track === HIPS_TRACK_ID
+                    ? selectedBones.includes('hips')
+                    : selectedBones.includes(row.track)
               }
               onScrubDown={onScrubDown}
               onScrubMove={onScrubMove}
@@ -740,6 +942,19 @@ export function Timeline() {
               style={{
                 left: LABEL_W + Math.min(marquee.t0, marquee.t1) * pps,
                 width: Math.abs(marquee.t1 - marquee.t0) * pps,
+              }}
+            />
+          )}
+
+          {/* Explorer-style drag-select rectangle */}
+          {rectSelect && (
+            <div
+              className="tl-marquee rect"
+              style={{
+                left: rectSelect.left,
+                top: rectSelect.top,
+                width: rectSelect.width,
+                height: rectSelect.height,
               }}
             />
           )}

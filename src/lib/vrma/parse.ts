@@ -93,12 +93,21 @@ export interface PosKey {
   ease?: Ease;
   bez?: Bez;
 }
+export interface ExprKey {
+  id: number;
+  t: number;
+  w: number; // expression weight 0..1
+  ease?: Ease;
+  bez?: Bez;
+}
 
 export interface VrmaData {
   name: string;
   duration: number;
   rotTracks: Partial<Record<string, RotKey[]>>; // bone name -> sorted keys
   hipsTrack: PosKey[];
+  /** Expression (blendshape) name (VRM 1.0 naming) -> sorted keys. */
+  exprTracks: Record<string, ExprKey[]>;
   /** Rest hips height (Y) of the rig the animation was authored on.
    *  Read from the hips node's translation; used to rescale hips motion
    *  onto models of a different height (as the reference implementation does). */
@@ -305,6 +314,22 @@ function parseVec3Track(track: RawTrack, out: PosKey[]) {
   }
 }
 
+// Expression channels target a proxy node with a VEC3 translation whose X is
+// the weight; be tolerant of other vector widths by taking component 0.
+function parseWeightTrack(track: RawTrack, out: ExprKey[]) {
+  const numComp = track.numComp;
+  const { times, values } = toLinearKeys(track);
+  out.length = 0;
+  let lastT = -Infinity;
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i];
+    if (t <= lastT) continue;
+    const w = Math.min(1, Math.max(0, values[i * numComp]));
+    out.push({ id: allocKeyId(), t, w });
+    lastT = t;
+  }
+}
+
 export function parseVRMA(buffer: ArrayBuffer): VrmaData {
   const { json, bin } = readGltf(buffer);
   const ext = json.extensions?.VRMC_vrm_animation;
@@ -327,6 +352,16 @@ export function parseVRMA(buffer: ArrayBuffer): VrmaData {
     throw new VrmaParseError('VRMA has no humanoid bone mapping');
   }
 
+  // Expression mapping: expression name -> proxy node index. Preset names are
+  // the VRM 1.0 names three-vrm exposes at runtime, custom names map by name.
+  const exprByNode = new Map<number, string>();
+  const exprDecls = { ...ext.expressions?.preset, ...ext.expressions?.custom };
+  for (const [name, entry] of Object.entries(exprDecls as Record<string, any>)) {
+    if (entry && typeof entry.node === 'number' && !exprByNode.has(entry.node)) {
+      exprByNode.set(entry.node, name);
+    }
+  }
+
   const anim = json.animations?.[0];
   if (!anim) throw new VrmaParseError('VRMA has no animation');
 
@@ -335,6 +370,7 @@ export function parseVRMA(buffer: ArrayBuffer): VrmaData {
     duration: 0,
     rotTracks: {},
     hipsTrack: [],
+    exprTracks: {},
     restHipsY: 0,
   };
 
@@ -343,22 +379,26 @@ export function parseVRMA(buffer: ArrayBuffer): VrmaData {
     const node = channel.target?.node;
     const path = channel.target?.path;
     const bone = boneByNode.get(node);
+    const exprName = bone == null && node != null ? exprByNode.get(node) : undefined;
     const sampler = anim.samplers?.[channel.sampler];
-    if (!sampler || bone == null) {
+    if (!sampler || (bone == null && exprName == null)) {
       ignoredChannels++;
       continue;
     }
-    if (path === 'rotation') {
+    if (path === 'rotation' && bone != null) {
       const keys = (data.rotTracks[bone] ??= []);
       parseQuaternionTrack(readTrack(json, bin, sampler), keys);
     } else if (path === 'translation' && bone === 'hips') {
       parseVec3Track(readTrack(json, bin, sampler), data.hipsTrack);
+    } else if (path === 'translation' && exprName != null) {
+      const keys = (data.exprTracks[exprName] ??= []);
+      parseWeightTrack(readTrack(json, bin, sampler), keys);
     } else {
       ignoredChannels++;
     }
   }
   if (ignoredChannels > 0) {
-    console.warn(`VRMA import: ignored ${ignoredChannels} unsupported channels (e.g. expressions/props)`);
+    console.warn(`VRMA import: ignored ${ignoredChannels} unsupported channels (e.g. props)`);
   }
 
   let duration = 0;
@@ -366,6 +406,9 @@ export function parseVRMA(buffer: ArrayBuffer): VrmaData {
     for (const k of keys!) duration = Math.max(duration, k.t);
   }
   for (const k of data.hipsTrack) duration = Math.max(duration, k.t);
+  for (const keys of Object.values(data.exprTracks)) {
+    for (const k of keys) duration = Math.max(duration, k.t);
+  }
   data.duration = duration > 0 ? duration : 0.001;
 
   // Rest hips height of the authoring rig: prefer the hips node's stored
@@ -382,7 +425,8 @@ export function parseVRMA(buffer: ArrayBuffer): VrmaData {
     data.restHipsY = 1;
   }
 
-  const hasAny = Object.keys(data.rotTracks).length > 0 || data.hipsTrack.length > 0;
+  const hasAny =
+    Object.keys(data.rotTracks).length > 0 || data.hipsTrack.length > 0 || Object.keys(data.exprTracks).length > 0;
   if (!hasAny) throw new VrmaParseError('VRMA contains no humanoid animation tracks');
 
   return data;

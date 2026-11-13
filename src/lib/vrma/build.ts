@@ -2,9 +2,10 @@
 // editor's animation model. Follows the VRM 1.0 animation spec:
 //  - humanoid bone rotations as quaternion channels (T-pose relative)
 //  - hips translation (optional, offset from rest position, meters)
+//  - expression weights as proxy-node VEC3 translation channels (X = weight)
 //  - LINEAR interpolation, FLOAT accessors
 
-import type { Bez, Ease, PosKey, Quat, RotKey, Vec3, VrmaData } from './parse';
+import type { Bez, Ease, ExprKey, PosKey, Quat, RotKey, Vec3, VrmaData } from './parse';
 import { easeAlpha } from './parse';
 import { BONE_ORDER_INDEX } from '../humanoid';
 
@@ -52,6 +53,20 @@ function lerpVec3(a: Vec3, b: Vec3, t: number): Vec3 {
     a[2] + (b[2] - a[2]) * t,
   ];
 }
+
+function lerpNum(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+// VRM 1.0 preset expression names (the spec's `expressions.preset` set;
+// lookUp/lookDown/lookLeft/lookRight belong to lookAt, not expressions).
+// Any other track name exports under `expressions.custom`.
+const VRM1_PRESET_EXPRESSIONS = new Set([
+  'happy', 'angry', 'sad', 'relaxed', 'surprised',
+  'aa', 'ih', 'ou', 'ee', 'oh',
+  'blink', 'blinkLeft', 'blinkRight',
+  'neutral',
+]);
 
 // Expand a key list into plain linear keys, resampling non-linear segments
 // (ease-in / ease-out / in-out / step / custom bezier) at BAKE_FPS. A 'step'
@@ -209,7 +224,39 @@ export function buildVRMA(data: VrmaData): ArrayBuffer {
     }
   }
 
-  if (channels.length === 0) throw new Error('Nothing to export: animation has no keyframes');
+  if (channels.length === 0 && !Object.values(data.exprTracks).some((k) => (k?.length ?? 0) > 0)) {
+    throw new Error('Nothing to export: animation has no keyframes');
+  }
+
+  // --- expression channels ---
+  // One proxy node per animated expression; the weight rides the X component
+  // of a VEC3 translation channel (VRM 1.0 animation spec), declared under
+  // extensions.VRMC_vrm_animation.expressions as preset or custom.
+  const presetExprs: Record<string, { node: number }> = {};
+  const customExprs: Record<string, { node: number }> = {};
+  const sceneNodes = boneList.map((_, i) => i);
+  const exprEntries = Object.entries(data.exprTracks)
+    .filter(([, keys]) => (keys?.length ?? 0) > 0)
+    .sort(([a], [b]) => a.localeCompare(b));
+  for (const [name, keys] of exprEntries) {
+    const nodeIndex = nodes.length;
+    nodes.push({ name: 'ex_' + name, translation: [0, 0, 0] });
+    sceneNodes.push(nodeIndex);
+    (VRM1_PRESET_EXPRESSIONS.has(name) ? presetExprs : customExprs)[name] = { node: nodeIndex };
+
+    const baked = bakeTrack<ExprKey>(keys, (k) => k.w, lerpNum);
+    const times = new Float32Array(baked.length);
+    const values = new Float32Array(baked.length * 3);
+    baked.forEach((k, j) => {
+      times[j] = k.t;
+      values[j * 3] = k.v;
+    });
+    const timeAcc = addAccessor(times, 1, 'SCALAR');
+    const valueAcc = addAccessor(values, 3, 'VEC3');
+    const samplerIndex = samplers.length;
+    samplers.push({ input: timeAcc, output: valueAcc, interpolation: 'LINEAR' });
+    channels.push({ sampler: samplerIndex, target: { node: nodeIndex, path: 'translation' } });
+  }
 
   const binData = bin.build();
 
@@ -219,7 +266,7 @@ export function buildVRMA(data: VrmaData): ArrayBuffer {
       generator: 'vrma-editor',
     },
     scene: 0,
-    scenes: [{ name: 'VRMAnimation', nodes: boneList.map((_, i) => i) }],
+    scenes: [{ name: 'VRMAnimation', nodes: sceneNodes }],
     nodes,
     animations: [
       {
@@ -236,6 +283,14 @@ export function buildVRMA(data: VrmaData): ArrayBuffer {
       VRMC_vrm_animation: {
         specVersion: '1.0',
         humanoid: { humanBones },
+        ...(exprEntries.length > 0
+          ? {
+              expressions: {
+                ...(Object.keys(presetExprs).length > 0 ? { preset: presetExprs } : {}),
+                ...(Object.keys(customExprs).length > 0 ? { custom: customExprs } : {}),
+              },
+            }
+          : {}),
       },
     },
   };

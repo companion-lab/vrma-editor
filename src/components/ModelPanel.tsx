@@ -469,6 +469,7 @@ function AssetsSection({ edits }: { edits: ModelEdits }) {
 function ExpressionsSection({ edits }: { edits: ModelEdits }) {
   const vrm = useEditor((s) => s.vrm);
   const baked = useEditor((s) => s.modelBakedExpressions);
+  const exprTracks = useEditor((s) => s.exprTracks);
   const names = useMemo(() => (vrm ? expressionNames(vrm) : []), [vrm]);
   if (names.length === 0) return <div className="muted pad">This model has no expressions.</div>;
   return (
@@ -491,9 +492,13 @@ function ExpressionsSection({ edits }: { edits: ModelEdits }) {
       </div>
       {names.map((n) => {
         const w = edits.expressions[n] ?? baked[n] ?? 0;
+        const keyed = (exprTracks[n]?.length ?? 0) > 0;
         return (
           <div className="ctl-row" key={n}>
-            <span className="expr-name">{n}</span>
+            <span className="expr-name" title={keyed ? `${n} — animated on the timeline` : n}>
+              {n}
+              {keyed && <span className="edit-badge" title="This expression has animation keyframes (Pose tab)">anim</span>}
+            </span>
             <input
               type="range"
               min={0}

@@ -5,7 +5,7 @@
 import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
 import { Quaternion, Vector3 } from 'three';
 import { easeAlpha, EASE_FUNCS } from './vrma/parse';
-import type { Ease, PosKey, RotKey, VrmaData, Quat, Vec3 } from './vrma/parse';
+import type { Ease, ExprKey, PosKey, RotKey, VrmaData, Quat, Vec3 } from './vrma/parse';
 
 const IDENTITY_Q = new Quaternion(0, 0, 0, 1);
 
@@ -18,11 +18,13 @@ export function getNormNode(vrm: VRM, bone: string) {
   return vrm.humanoid?.getNormalizedBoneNode(bone as VRMHumanBoneName) ?? null;
 }
 
-// Bones manually manipulated since the last time change: the pose playback
-// leaves these alone so live edits don't fight with the sampler.
+// Bones/expressions manually manipulated since the last time change: the pose
+// playback leaves these alone so live edits don't fight with the sampler.
 export const manipulatedBones = new Set<string>();
+export const manipulatedExpressions = new Set<string>();
 export function clearManipulated() {
   manipulatedBones.clear();
+  manipulatedExpressions.clear();
 }
 
 function upperBound(keys: { t: number }[], t: number): number {
@@ -71,6 +73,37 @@ export function sampleVec3(keys: PosKey[], t: number, out: Vector3): Vector3 {
   out.set(a.p[0], a.p[1], a.p[2]);
   out.lerp(TMP_V2.set(b.p[0], b.p[1], b.p[2]), alpha);
   return out;
+}
+
+export function sampleWeight(keys: ExprKey[], t: number): number {
+  if (keys.length === 0) return 0;
+  const i = upperBound(keys, t);
+  if (i === 0) return keys[0].w;
+  if (i >= keys.length) return keys[keys.length - 1].w;
+  const a = keys[i - 1];
+  const b = keys[i];
+  const span = b.t - a.t;
+  const alpha = span > 1e-9 ? easeAlpha(a.ease, (t - a.t) / span, a.bez) : 0;
+  return a.w + (b.w - a.w) * alpha;
+}
+
+/**
+ * Apply the animation's expression tracks at `time` to the VRM. Only
+ * expressions that HAVE a track are driven — other expressions keep whatever
+ * static weight (model edit / file rest value) they currently hold, and
+ * expressions in `manipulatedExpressions` are left alone until the playhead
+ * moves (same contract as manipulatedBones). No-op without expression tracks.
+ */
+export function applyExpressions(vrm: VRM, data: VrmaData | null, time: number): void {
+  const manager = vrm.expressionManager;
+  const tracks = data?.exprTracks;
+  if (!manager || !tracks) return;
+  for (const [name, keys] of Object.entries(tracks)) {
+    if (!keys || keys.length === 0) continue;
+    if (manipulatedExpressions.has(name)) continue;
+    if (!manager.expressionMap[name]) continue; // model lacks this expression
+    manager.setValue(name, Math.min(1, Math.max(0, sampleWeight(keys, time))));
+  }
 }
 
 /**

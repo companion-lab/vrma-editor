@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import App from './App';
-import { useEditor } from './store';
+import { useEditor, makeSampleData } from './store';
 import { manipulatedBones, sampleVec3, applyPose } from './lib/animation';
 import { startAiBridge } from './lib/ai/bridge';
 import './styles.css';
@@ -14,6 +14,7 @@ startAiBridge();
 if (typeof window !== 'undefined') {
   (window as any).__editor = {
     useEditor,
+    makeSampleData,
     manipulated: () => [...manipulatedBones],
     sampleVec3,
     applyPose,

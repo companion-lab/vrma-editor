@@ -104,13 +104,15 @@ function aiBridge(): Plugin {
             pending.delete(cid);
             return;
           }
-          // Watchdog: reply with an error if the editor never answers.
+          // Watchdog: reply with an error if the editor never answers. Must
+          // exceed the MCP client's own timeout (90s) so a slow-but-alive
+          // editor (model loading) isn't cut off with a misleading error.
           setTimeout(() => {
             if (pending.get(cid) === ws) {
               pending.delete(cid);
               send(ws, { __cid: cid, id, ok: false, error: 'Editor did not respond in time' });
             }
-          }, 60000);
+          }, 120000);
         });
       });
 

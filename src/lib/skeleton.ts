@@ -17,6 +17,12 @@ const COLOR_DEFAULT = new THREE.Color(0x9fd8ff);
 const COLOR_SELECTED = new THREE.Color(0xffa640);
 const COLOR_KEYED = new THREE.Color(0x3ddc97);
 
+/** Light viewports need a darker default bone color for contrast. The
+    per-frame update (update()) picks the change up on its next tick. */
+export function setSkeletonTheme(light: boolean) {
+  COLOR_DEFAULT.set(light ? 0x3b82f6 : 0x9fd8ff);
+}
+
 const JOINT_RADIUS = 0.012;
 const SMALL_JOINT_RADIUS = 0.005; // fingers / toes
 const LINK_RADIUS = 0.0035;

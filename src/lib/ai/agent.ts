@@ -32,6 +32,19 @@ function trunc(text: string, max = MAX_TOOL_CHARS): string {
   return text.length > max ? `${text.slice(0, max)}… [truncated ${text.length - max} chars]` : text;
 }
 
+/** Wire content for a tool result. Screenshot data URLs are stripped — the
+ *  image is fed back separately as vision input, and a 20k-char base64 blob
+ *  in the tool message is pure noise for the model. */
+function toolResultForHistory(result: ToolResult): string {
+  if (!result.ok) return JSON.stringify({ error: result.error });
+  const r = result.result;
+  if (r && typeof r === 'object' && typeof (r as { dataUrl?: unknown }).dataUrl === 'string') {
+    const { dataUrl, ...rest } = r as { dataUrl: string; [k: string]: unknown };
+    return JSON.stringify({ ...rest, dataUrl: `[${dataUrl.length} chars — attached as an image after this result]` });
+  }
+  return JSON.stringify(r ?? null);
+}
+
 // --- System prompt ---
 
 function editorSnapshot(): string {
@@ -40,10 +53,14 @@ function editorSnapshot(): string {
     .filter(([, k]) => k?.length)
     .map(([b, k]) => `${b}(${k!.length})`)
     .join(', ');
+  const keyedExpr = Object.entries(st.exprTracks)
+    .filter(([, k]) => k.length)
+    .map(([n, k]) => `${n}(${k.length})`)
+    .join(', ');
   return [
     `- Model: ${st.vrm ? `${st.modelName} (loaded, ${Object.keys(st.vrm.humanoid?.humanBones ?? {}).length} bones, restHipsY ${st.restHipsPos.y.toFixed(3)})` : 'none loaded — call load_model or ask the user'}`,
     `- Animation: "${st.animName}", duration ${st.duration.toFixed(2)}s, playhead ${st.time.toFixed(2)}s, restHipsY ${st.animRestHipsY.toFixed(3)}`,
-    `- Keyed tracks: ${keyed || 'none'}; hips position keys: ${st.hipsTrack.length}`,
+    `- Keyed tracks: ${keyed || 'none'}; hips position keys: ${st.hipsTrack.length}; expression keys: ${keyedExpr || 'none'}`,
     `- Transport: ${st.playing ? 'playing' : 'paused'}, loop ${st.loop ? 'on' : 'off'}, autoKey ${st.autoKey ? 'on' : 'off'}, snap ${st.snap ? `${st.snap.toFixed(4)}s` : 'off'}`,
   ].join('\n');
 }
@@ -60,20 +77,41 @@ const SYSTEM_PROMPT = () => [
   '',
   '## How to author animations',
   '- For a new animation prefer ONE set_animation call with sparse keys (2-6 per bone) and ease curves ("out" for snappy attack, "inout" for smooth). One set_animation beats dozens of add_rotation_key calls.',
-  '- Rotations are relative to T-pose (identity). In set_animation, q quaternions are [x,y,z,w] in canonical space; or build keys with add_rotation_key using euler degrees [x,y,z] (YXZ). Left/right limbs mirror X/Z signs.',
+  '- Rotations are relative to T-pose (identity), canonical space, on every model. Keys accept q quaternions [x,y,z,w] OR euler degrees [x,y,z] (YXZ) — PREFER euler: set_animation keys take { t, euler: [x,y,z], ease? } directly and add_rotation_key takes euler too. Never hand-convert euler to quaternions; the executor does it. Left/right limbs mirror X/Z signs.',
   '- Hips motion: add_hips_key with an offset in meters from the standing rest pose ([0,-0.2,0] ≈ crouch 20cm).',
+  '- Facial expressions can be animated too: exprTracks in set_animation take { expressionName: [{ t, w: 0..1, ease? }] } (names via list_expressions), or key per-step with add_expression_key. Weights are 0..1; e.g. happy 1 → 0 over 0.5s is a quick smile. Use set_expression only for a permanent rest-face change.',
   '- After creating or changing an animation: set_transport { time: 0, playing: true } and use screenshot to visually check a pose or two; iterate if the pose looks wrong (flip signs if a limb bends the wrong way).',
   '- If no model is loaded, call list_models + load_model first, then CONTINUE with the request.',
   '- If the right model is already loaded, skip load_model entirely.',
   '',
-  '## Recipe: a wave (verified against the spec reference implementation — adapt freely)',
-  'set_animation with: duration 2.4, restHipsY = the model restHipsY from get_state, rotTracks {',
+  '## Recipe: a wave (verified — adapt freely)',
+  'set_animation with: duration 2.4, restHipsY = the model restHipsY from the state block, rotTracks {',
   '  rightUpperArm: t=0 q=[0,0,0,1] → t=0.6 q=[0,0,-0.6088,0.7934] ease "out" → t=2.4 hold — this RAISES the right arm sideways-up;',
   '  rightLowerArm: forearm wave, alternating q=[0,0,0,1] ↔ q=[0,0.4617,0,0.8870] (±55° about Y) every ~0.4s with ease "inout";',
   '  head (optional): idle sway qz(-10°) ↔ qz(+10°); spine (optional): slight twist qy(-8°) ↔ qy(+8°)',
   '} — then set_transport { time: 0, playing: true } and screenshot to verify.',
   '',
+  '## Recipe: a walk (canonical euler degrees — verified; adapt timings freely)',
+  'Walking in place, 1.0s loop, right-leg heel strike at t=0. ONE set_animation call (euler keys — no quaternion math), restHipsY = the model restHipsY:',
+  '- rightUpperLeg: t=0 [-28,0,0] (knee forward) → t=0.5 [18,0,0] (leg behind) → t=1 [-28,0,0]; ease "inout".',
+  '- leftUpperLeg: opposite phase: t=0 [18,0,0] → t=0.5 [-28,0,0] → t=1 [18,0,0].',
+  '- rightLowerLeg — knee FLEXION is +X (the heel kicks up backward, never forward): t=0 [6,0,0] → t=0.25 [12,0,0] → t=0.5 [30,0,0] (toe-off) → t=0.7 [55,0,0] (swing peak) → t=0.85 [25,0,0] → t=1 [6,0,0].',
+  '- leftLowerLeg: same shape shifted half a cycle: t=0 [30,0,0] → t=0.2 [55,0,0] → t=0.35 [25,0,0] → t=0.5 [6,0,0] → t=0.75 [12,0,0] → t=1 [30,0,0].',
+  '- Arms swing OPPOSITE to the legs, hanging down first: right arm lowered = z +75, left arm lowered = z -75; for a lowered arm, +x swings it forward, -x backward.',
+  '- rightUpperArm: t=0 [12,0,75] (back) → t=0.5 [-12,0,75] (forward) → t=1 [12,0,75]; leftUpperArm: t=0 [-12,0,-75] (forward) → t=0.5 [12,0,-75] (back) → t=1 [-12,0,-75].',
+  '- Feet (optional, adds realism; +x pitches toes down, -x up): rightFoot t=0 [-10,0,0] (heel strike, toes up) → t=0.5 [25,0,0] (toe-off) → t=0.7 [10,0,0] → t=1 [-10,0,0]; leftFoot same signs, phase shifted 0.5.',
+  '- hipsTrack: p [0, restHipsY-0.03, 0] at t=0/0.5/1 (double support, lowest) ↔ [0, restHipsY+0.02, 0] at t=0.25/0.75 (mid-stance, highest).',
+  '- Then set_transport { time: 0, playing: true, loop: true } and screenshot at t≈0.1, 0.5, 0.8: check that the striking leg reaches forward with the knee ahead, the swinging knee bends backward (+x), and arms counter-swing the legs.',
+  '',
+  '## Motion from a video (motion reference)',
+  '- To extract motion from a video, the user must load it first via the "Motion video…" toolbar button. When get_motion_video_info errors with "no motion video loaded", tell the user to load one and wait — you cannot open videos yourself.',
+  '- Workflow: get_motion_video_info → pick fps + segment → extract_motion_from_video → review warnings → refine. Default fps 15 (30 for fast motion, lower for long clips); keep the segment ≤60s and prefer the most interesting part over whole long videos.',
+  '- The extraction REPLACES the current animation (one undo step) and starts playing. Treat the result as a REFERENCE, not a final animation: check coveragePct/warnings, screenshot a couple of poses, then clean up — set_track_ease "inout" for smoothness, clear_track on noisy sparse tracks, adjust hips keys.',
+  '- The Motion tab also offers REALTIME tracking the user drives themselves: "Start live" tracks their webcam and moves the model live (optionally capturing the take as keyframes on stop). It is user-driven (camera access) — there is no tool for it; when the user mentions live tracking, point them to the Motion tab.',
+  '- Known limits: no finger/hand data; hips forward/backward travel is not recoverable from monocular video (vertical bob and lateral sway are); very fast spins may smear.',
+  '',
   '## Rotation cheat sheet (euler degrees, YXZ, T-pose = identity — signs VERIFIED)',
+  '- These euler degrees are the canonical authoring space on EVERY model (VRM 0.x and 1.0): the same signs for add_rotation_key euler, set_animation euler keys, and the pose sliders. Playback handles any model-space mirroring internally.',
   '- Frame: the model faces the default camera. Its RIGHT side appears on the LEFT of the screen. +X = screen right (the model\'s left), +Y = up, +Z = toward the camera.',
   '- Z rotation swings limbs within the screen plane. Raise the RIGHT arm: rightUpperArm [0,0,-75]. Raise the LEFT arm: leftUpperArm [0,0,75]. (Right/left limbs mirror: flip the X and Z signs.)',
   '- X rotation tilts forward/back: head [10,0,0] nods down, head [-10,0,0] looks up; rightUpperLeg [-30,0,0] raises the right knee forward.',
@@ -123,11 +161,19 @@ export function runAgent(
         pruneHistory(messages);
 
         const assistant = await chatCompletion(messages, { signal: controller.signal });
-        messages.push({ role: 'assistant', content: assistant.content ?? '', tool_calls: assistant.tool_calls });
+        const calls = assistant.tool_calls ?? [];
+        // Some OpenAI-compatible endpoints omit tool_call ids. A tool result
+        // without a matching id is rejected/dropped by providers — the model
+        // would never see the result — so assign one when missing.
+        for (let ci = 0; ci < calls.length; ci++) {
+          if (typeof calls[ci].id !== 'string' || !calls[ci].id) {
+            calls[ci].id = `call_${i}_${ci}_${Date.now().toString(36)}`;
+          }
+        }
+        messages.push({ role: 'assistant', content: assistant.content ?? '', tool_calls: calls.length ? calls : undefined });
 
         if (assistant.content) onEvent({ kind: 'assistant', text: assistant.content });
 
-        const calls = assistant.tool_calls ?? [];
         if (calls.length === 0) {
           // Stop-and-ask mid-task? Nudge the model to continue (bounded).
           const text = assistant.content ?? '';
@@ -157,8 +203,8 @@ export function runAgent(
 
           let image: string | undefined;
           if (result.ok && result.result && typeof result.result === 'object' && 'dataUrl' in (result.result as object)) {
-            const r = result.result as { dataUrl?: string };
-            image = r.dataUrl;
+            const raw = (result.result as { dataUrl?: unknown }).dataUrl;
+            image = typeof raw === 'string' ? raw : undefined;
           }
           images.push(...collectImages(result));
           onEvent({ kind: 'tool', name: call.function.name, args, result, image });
@@ -166,7 +212,7 @@ export function runAgent(
           messages.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: trunc(JSON.stringify(result.ok ? result.result : { error: result.error })),
+            content: trunc(toolResultForHistory(result)),
           });
         }
 

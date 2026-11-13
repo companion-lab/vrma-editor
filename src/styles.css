@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #101116;
   --panel: #17181f;
   --panel-2: #1d1f28;
@@ -10,6 +11,66 @@
   --danger: #f87171;
   --ok: #4ade80;
   --warn: #fbbf24;
+
+  /* theme-dependent semantic colors (dark values; overridden below for light) */
+  --viewport-bg: #0d0e13; /* 3D canvas frame + scene background */
+  --on-accent: #0d0e13; /* text on accent-filled elements (user bubble) */
+  --btn-hover: #242633;
+  --btn-hover-border: #3a3d4d;
+  --row-sep: #1c1e27;
+  --lane: #262a37;
+  --tick: #22242e;
+  --tick-major: #363a4d;
+  --accent-strong: #a5c8ff; /* accent hover: brighter in dark, darker in light */
+  --accent2-strong: #a78bfa;
+  --key-step: #f59e0b;
+  --key-custom: #f472b6;
+  --axis-x: #fb7185;
+  --axis-y: #4ade80;
+  --axis-z: #60a5fa;
+  --band: rgba(255, 255, 255, 0.025);
+  --row-hover: rgba(255, 255, 255, 0.02);
+  --mat-controls-bg: rgba(0, 0, 0, 0.12);
+  --shadow-color: rgba(0, 0, 0, 0.45);
+  --backdrop: rgba(10, 10, 14, 0.6);
+  --hint-shadow: 0 1px 2px #000;
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --bg: #eef0f5;
+  --panel: #ffffff;
+  --panel-2: #f6f7fb;
+  --border: #d9dbe5;
+  --text: #23252d;
+  --muted: #686d7e;
+  --accent: #3b82f6;
+  --accent-2: #7c3aed;
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --warn: #b45309;
+
+  --viewport-bg: #e9ebf1;
+  --on-accent: #ffffff;
+  --btn-hover: #e9ebf2;
+  --btn-hover-border: #c3c6d3;
+  --row-sep: #e5e7ee;
+  --lane: #dfe1ea;
+  --tick: #d5d7e0;
+  --tick-major: #b9bdc9;
+  --accent-strong: #1d4ed8;
+  --accent2-strong: #6d28d9;
+  --key-step: #d97706;
+  --key-custom: #db2777;
+  --axis-x: #e11d48;
+  --axis-y: #16a34a;
+  --axis-z: #2563eb;
+  --band: rgba(0, 0, 0, 0.028);
+  --row-hover: rgba(0, 0, 0, 0.025);
+  --mat-controls-bg: rgba(0, 0, 0, 0.05);
+  --shadow-color: rgba(15, 18, 35, 0.18);
+  --backdrop: rgba(15, 17, 25, 0.45);
+  --hint-shadow: none;
 }
 
 * {
@@ -92,17 +153,17 @@ body {
 }
 
 .status.ok {
-  background: rgba(74, 222, 128, 0.12);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
   color: var(--ok);
 }
 
 .status.error {
-  background: rgba(248, 113, 113, 0.12);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }
 
 .status.info {
-  background: rgba(110, 168, 254, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
 }
 
@@ -124,8 +185,8 @@ body {
 }
 
 .btn:hover {
-  background: #242633;
-  border-color: #3a3d4d;
+  background: var(--btn-hover);
+  border-color: var(--btn-hover-border);
 }
 
 .btn.icon {
@@ -133,13 +194,13 @@ body {
 }
 
 .btn.accent {
-  background: rgba(110, 168, 254, 0.15);
-  border-color: rgba(110, 168, 254, 0.4);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   color: var(--accent);
 }
 
 .btn.accent:hover {
-  background: rgba(110, 168, 254, 0.25);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 .btn.danger {
@@ -147,14 +208,14 @@ body {
 }
 
 .btn.danger:hover {
-  background: rgba(248, 113, 113, 0.12);
-  border-color: rgba(248, 113, 113, 0.4);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
 
 .btn.active {
   color: var(--accent);
-  border-color: rgba(110, 168, 254, 0.55);
-  background: rgba(110, 168, 254, 0.12);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .btn:disabled {
@@ -323,7 +384,7 @@ kbd {
 }
 
 .bone-item.selected {
-  background: rgba(110, 168, 254, 0.16);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
 }
 
@@ -398,7 +459,7 @@ kbd {
   flex: 1;
   position: relative;
   min-width: 0;
-  background: #0d0e13;
+  background: var(--viewport-bg);
 }
 
 .viewport {
@@ -416,7 +477,7 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(13, 14, 19, 0.6);
+  background: var(--backdrop);
   color: var(--text);
   pointer-events: none;
   font-size: 14px;
@@ -429,7 +490,7 @@ kbd {
   color: var(--muted);
   font-size: 11px;
   pointer-events: none;
-  text-shadow: 0 1px 2px #000;
+  text-shadow: var(--hint-shadow);
 }
 
 /* ---------- inspector ---------- */
@@ -473,9 +534,9 @@ kbd {
   font-weight: 700;
 }
 
-.axis-x { color: #fb7185; }
-.axis-y { color: #4ade80; }
-.axis-z { color: #60a5fa; }
+.axis-x { color: var(--axis-x); }
+.axis-y { color: var(--axis-y); }
+.axis-z { color: var(--axis-z); }
 
 .axis-row .num {
   width: 100%;
@@ -504,7 +565,7 @@ input[type='range']::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  border: 2px solid #0d0e13;
+  border: 2px solid var(--bg);
 }
 
 input[type='range']::-moz-range-thumb {
@@ -513,7 +574,7 @@ input[type='range']::-moz-range-thumb {
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
-  border: 2px solid #0d0e13;
+  border: 2px solid var(--bg);
 }
 
 .btn-row {
@@ -656,7 +717,7 @@ input[type='range']::-moz-range-thumb {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--band);
 }
 
 .tl-row {
@@ -667,7 +728,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .tl-row + .tl-row {
-  border-top: 1px solid #1c1e27;
+  border-top: 1px solid var(--row-sep);
 }
 
 .tl-row.ruler-row {
@@ -679,12 +740,12 @@ input[type='range']::-moz-range-thumb {
 }
 
 .tl-row:not(.ruler-row):hover .tl-track {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--row-hover);
 }
 
 /* selected bone's row lane gets a faint tint */
 .tl-row.sel:not(.ruler-row) .tl-track {
-  background: rgba(110, 168, 254, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .tl-label {
@@ -728,7 +789,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .tl-label.clickable.selected {
-  background: rgba(110, 168, 254, 0.16);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -748,9 +809,8 @@ input[type='range']::-moz-range-thumb {
   cursor: ew-resize;
 }
 
-.tl-row:not(.ruler-row) .tl-track {
-  cursor: ew-resize;
-}
+/* Keyframe lanes: default arrow — dragging here box-selects keys (like empty
+   space in a file explorer); scrubbing lives on the ruler / playhead cap. */
 
 .lane {
   position: absolute;
@@ -758,7 +818,7 @@ input[type='range']::-moz-range-thumb {
   right: 0;
   top: 50%;
   height: 1px;
-  background: #262a37;
+  background: var(--lane);
 }
 
 /* continuous bar from a track's first to its last key */
@@ -768,17 +828,26 @@ input[type='range']::-moz-range-thumb {
   height: 5px;
   transform: translateY(-50%);
   border-radius: 2.5px;
-  background: linear-gradient(90deg, rgba(110, 168, 254, 0.22), rgba(110, 168, 254, 0.42));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 22%, transparent),
+    color-mix(in srgb, var(--accent) 42%, transparent)
+  );
 }
 
-/* the bar drags the whole track in time */
+/* the bar moves the whole track with Alt+drag; the default lane drag is a
+   box selection, so the cursor stays the plain arrow */
 .span.grab {
-  cursor: grab;
+  cursor: default;
 }
 
 /* selected track: the bar reads as "this moves when you drag it" */
 .tl-row.sel:not(.ruler-row) .span {
-  background: linear-gradient(90deg, rgba(110, 168, 254, 0.55), rgba(110, 168, 254, 0.9));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    color-mix(in srgb, var(--accent) 90%, transparent)
+  );
 }
 
 /* Alt+drag box-selection band over the rows */
@@ -787,10 +856,15 @@ input[type='range']::-moz-range-thumb {
   top: 0;
   bottom: 0;
   z-index: 2;
-  background: rgba(110, 168, 254, 0.13);
-  border-left: 1px solid rgba(110, 168, 254, 0.75);
-  border-right: 1px solid rgba(110, 168, 254, 0.75);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--accent) 75%, transparent);
   pointer-events: none;
+}
+
+/* Explorer-style drag-select rectangle (2D: rows × time) */
+.tl-marquee.rect {
+  border: 1px solid color-mix(in srgb, var(--accent) 80%, transparent);
 }
 
 .tick {
@@ -798,12 +872,12 @@ input[type='range']::-moz-range-thumb {
   top: 16px;
   bottom: 0;
   width: 1px;
-  background: #22242e;
+  background: var(--tick);
 }
 
 .tick.major {
   top: 0;
-  background: #363a4d;
+  background: var(--tick-major);
 }
 
 .tick.major span {
@@ -826,18 +900,18 @@ input[type='range']::-moz-range-thumb {
   border-radius: 2.5px;
   cursor: grab;
   z-index: 2;
-  border: 1px solid #0d0e13;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--viewport-bg);
+  box-shadow: 0 1px 3px var(--shadow-color);
   transition: background 0.1s;
 }
 
 .diamond:hover {
-  background: #a5c8ff;
+  background: var(--accent-strong);
 }
 
 .diamond.selected {
   background: var(--accent-2);
-  outline: 2px solid rgba(139, 92, 246, 0.45);
+  outline: 2px solid color-mix(in srgb, var(--accent-2) 45%, transparent);
   z-index: 3;
 }
 
@@ -856,7 +930,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .diamond.ease-step {
-  background: #f59e0b;
+  background: var(--key-step);
   border-radius: 3px;
 }
 
@@ -864,15 +938,15 @@ input[type='range']::-moz-range-thumb {
 .diamond.ease-out.selected,
 .diamond.ease-inout.selected,
 .diamond.ease-step.selected {
-  outline: 2px solid rgba(110, 168, 254, 0.6);
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .diamond.ease-custom {
-  background: #f472b6;
+  background: var(--key-custom);
 }
 
 .diamond.ease-custom.selected {
-  outline: 2px solid rgba(110, 168, 254, 0.6);
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 /* custom ease curve editor (Inspector > Transition) */
@@ -898,7 +972,7 @@ input[type='range']::-moz-range-thumb {
   width: 2px;
   margin-left: -1px;
   background: var(--accent-2);
-  box-shadow: 0 0 6px rgba(139, 92, 246, 0.55);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent-2) 55%, transparent);
   z-index: 4;
   pointer-events: none;
 }
@@ -912,13 +986,13 @@ input[type='range']::-moz-range-thumb {
   transform: rotate(45deg);
   background: var(--accent-2);
   border-radius: 3px;
-  border: 1px solid #0d0e13;
+  border: 1px solid var(--viewport-bg);
   pointer-events: auto;
-  cursor: ew-resize;
+  cursor: grab;
 }
 
 .playhead-cap:hover {
-  background: #a78bfa;
+  background: var(--accent2-strong);
 }
 
 .tl-empty {
@@ -958,8 +1032,8 @@ input[type='range']::-moz-range-thumb {
 
 .panel-tabs button.active {
   color: var(--accent);
-  background: rgba(110, 168, 254, 0.12);
-  border-color: rgba(110, 168, 254, 0.4);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .panel-tabs-spacer {
@@ -987,7 +1061,7 @@ input[type='range']::-moz-range-thumb {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 4px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px var(--shadow-color);
 }
 
 .dropdown-item {
@@ -1007,7 +1081,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .dropdown-item:hover {
-  background: rgba(110, 168, 254, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .dropdown-item.current {
@@ -1163,7 +1237,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .mat-row.edited {
-  border-color: rgba(139, 92, 246, 0.5);
+  border-color: color-mix(in srgb, var(--accent-2) 50%, transparent);
 }
 
 .mat-head {
@@ -1203,7 +1277,7 @@ input[type='range']::-moz-range-thumb {
 .edit-badge {
   color: var(--accent-2);
   font-size: 10px;
-  border: 1px solid rgba(139, 92, 246, 0.5);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 50%, transparent);
   border-radius: 4px;
   padding: 0 4px;
   flex: 0 0 auto;
@@ -1212,7 +1286,7 @@ input[type='range']::-moz-range-thumb {
 .mat-controls {
   padding: 5px 7px 7px;
   border-top: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--mat-controls-bg);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -1284,7 +1358,7 @@ input[type='range']::-moz-range-thumb {
 
 .mat-row.drag-over {
   border-color: var(--accent);
-  background: rgba(110, 168, 254, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .texture-row .tex-name {
@@ -1404,7 +1478,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .outfit-del:hover {
-  color: var(--danger, #f87171);
+  color: var(--danger);
 }
 
 .outfit-save {
@@ -1514,7 +1588,7 @@ input[type='range']::-moz-range-thumb {
 .ai-msg.user {
   align-self: flex-end;
   background: var(--accent);
-  color: #0d0e13;
+  color: var(--on-accent);
   font-weight: 500;
 }
 
@@ -1641,7 +1715,7 @@ input[type='range']::-moz-range-thumb {
 .ai-settings-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(10, 10, 14, 0.6);
+  background: var(--backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1660,4 +1734,83 @@ input[type='range']::-moz-range-thumb {
 
 .ai-settings .ctl-row input[type='checkbox'] {
   margin-right: 8px;
+}
+
+/* ---------- motion tracker panel ---------- */
+
+.motion-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Sections size naturally; the panel scrolls as one page. */
+.motion-panel .panel-body {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.motion-preview,
+.motion-cam {
+  display: block;
+  width: 100%;
+  max-height: 200px;
+  border-radius: 6px;
+  background: #000;
+  border: 1px solid var(--border);
+}
+
+.motion-cam-host {
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+.motion-cam-host .motion-cam {
+  border: none;
+  border-radius: 0;
+}
+
+.motion-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.motion-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.motion-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.15s ease;
+}
+
+.motion-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: 6px;
+  padding: 5px 7px;
+}
+
+@keyframes motion-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: motion-spin 0.9s linear infinite;
 }

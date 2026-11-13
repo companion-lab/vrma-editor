@@ -157,6 +157,30 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: cachedTools };
 });
 
+const DATA_URL_RE = /^data:([^;,]+);base64,(.*)$/;
+
+/** MCP content blocks for an editor tool result. Screenshots become real
+ *  image blocks (vision clients show them to the model) instead of a giant
+ *  base64 text string the model can never read. */
+function contentForResult(result) {
+  if (result && typeof result === 'object' && typeof result.dataUrl === 'string') {
+    const m = DATA_URL_RE.exec(result.dataUrl);
+    if (m) {
+      const dims = result.width && result.height ? ` (${result.width}x${result.height})` : '';
+      return {
+        content: [
+          { type: 'image', data: m[2], mimeType: m[1] },
+          {
+            type: 'text',
+            text: `Viewport screenshot captured${dims}. Inspect the pose/appearance and iterate if it looks wrong.`,
+          },
+        ],
+      };
+    }
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const name = req.params.name;
   const args = (req.params.arguments ?? {});
@@ -168,7 +192,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         isError: true,
       };
     }
-    return { content: [{ type: 'text', text: JSON.stringify(res.result, null, 2) }] };
+    return contentForResult(res.result);
   } catch (err) {
     return {
       content: [{ type: 'text', text: `Error: ${(err).message}` }],
