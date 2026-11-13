@@ -137,4 +137,33 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  build: {
+    // The 3D viewport is the app and renders on first paint, so three.js can't
+    // be lazy-loaded away. It is split into a cacheable vendor chunk, but
+    // three + @pixiv/three-vrm together are inherently ~1 MB minified.
+    chunkSizeWarningLimit: 1000,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'three',
+              priority: 20,
+              // three + @pixiv/three-vrm*, but NOT three-vrm-animation — it is
+              // only loaded lazily in main.tsx (reference impl hook) and must
+              // keep its own chunk.
+              test: /node_modules[\\/]three[\\/]|node_modules[\\/]@pixiv[\\/]three-vrm(?!-animation)[^\\/]*[\\/]/,
+            },
+            {
+              name: 'vendor',
+              priority: 10,
+              // Everything else from node_modules, except @mediapipe/tasks-vision
+              // which is loaded lazily when mocap starts (lib/mocap/pose.ts).
+              test: /node_modules[\\/](?!@mediapipe|@pixiv[\\/]three-vrm-animation)/,
+            },
+          ],
+        },
+      },
+    },
+  },
 });

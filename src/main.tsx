@@ -3,6 +3,12 @@ import App from './App';
 import { useEditor, makeSampleData } from './store';
 import { manipulatedBones, sampleVec3, applyPose } from './lib/animation';
 import { startAiBridge } from './lib/ai/bridge';
+// Statically imported because the rest of the app already pulls them in —
+// dynamic imports here were flagged as INEFFECTIVE_DYNAMIC_IMPORT by rolldown.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { parseVRMA } from './lib/vrma/parse';
+import { buildVRMA } from './lib/vrma/build';
 import './styles.css';
 
 createRoot(document.getElementById('root')!).render(<App />);
@@ -18,19 +24,14 @@ if (typeof window !== 'undefined') {
     manipulated: () => [...manipulatedBones],
     sampleVec3,
     applyPose,
-    GLTFLoader: undefined as any,
+    GLTFLoader,
+    THREE,
     refImpl: undefined as any,
-    parseVRMA: (buf: ArrayBuffer) => import('./lib/vrma/parse').then((m) => m.parseVRMA(buf)),
-    buildVRMA: (data: any) => import('./lib/vrma/build').then((m) => m.buildVRMA(data)),
+    parseVRMA: (buf: ArrayBuffer) => parseVRMA(buf),
+    buildVRMA: (data: any) => buildVRMA(data),
   };
   // Reference implementation for verifying import/export compatibility.
-  Promise.all([
-    import('three/examples/jsm/loaders/GLTFLoader.js'),
-    import('three'),
-    import('@pixiv/three-vrm-animation'),
-  ]).then(([gltf, three, ref]) => {
-    (window as any).__editor.GLTFLoader = (gltf as any).GLTFLoader;
-    (window as any).__editor.THREE = three;
+  import('@pixiv/three-vrm-animation').then((ref) => {
     (window as any).__editor.refImpl = ref;
   });
 }
