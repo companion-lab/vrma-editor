@@ -195,3 +195,74 @@ export function resetToRestPose(vrm: VRM, restHips: Vector3): void {
   humanoid.update();
   clearManipulated();
 }
+
+// --- Live-pose history ---
+// Undo/redo must also cover changes that aren't keyed yet (auto-key off):
+// the manipulated bones' current transforms and manipulated expressions'
+// weights ride along with every history push. Only manipulated things are
+// captured — everything else the playback sampler re-derives from the tracks
+// on restore.
+
+export interface LivePoseSnapshot {
+  /** Normalized humanoid bones currently manipulated. */
+  bones: string[];
+  /** bone -> live-space quaternion (raw normalized-rig value). */
+  rots: Record<string, Quat>;
+  /** Live hips position (raw normalized-rig value) while hips is manipulated. */
+  hips: Vec3 | null;
+  /** Expression names currently manipulated. */
+  exprs: string[];
+  /** Expression name -> current manager weight. */
+  exprWeights: Record<string, number>;
+}
+
+/** Snapshot the live (unkeyed) pose for a history push. Plain data only —
+ *  snapshots are cloned with structuredClone. */
+export function captureLivePose(vrm: VRM | null): LivePoseSnapshot {
+  if (!vrm || (manipulatedBones.size === 0 && manipulatedExpressions.size === 0)) {
+    return { bones: [], rots: {}, hips: null, exprs: [], exprWeights: {} };
+  }
+  const rots: Record<string, Quat> = {};
+  for (const bone of manipulatedBones) {
+    const node = getNormNode(vrm, bone);
+    if (!node) continue;
+    node.quaternion.normalize();
+    rots[bone] = [node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w];
+  }
+  const hipsNode = manipulatedBones.has('hips') ? getNormNode(vrm, 'hips') : null;
+  const exprWeights: Record<string, number> = {};
+  for (const name of manipulatedExpressions) {
+    const w = vrm.expressionManager?.getValue(name);
+    if (w != null) exprWeights[name] = w;
+  }
+  return {
+    bones: [...manipulatedBones],
+    rots,
+    hips: hipsNode ? [hipsNode.position.x, hipsNode.position.y, hipsNode.position.z] : null,
+    exprs: [...manipulatedExpressions],
+    exprWeights,
+  };
+}
+
+/** Restore a captured live pose (undo/redo): repopulate the manipulated sets
+ *  and write the transforms back to the rig, so the restored state looks
+ *  exactly as it did when the snapshot was taken. */
+export function restoreLivePose(vrm: VRM | null, snap: LivePoseSnapshot): void {
+  manipulatedBones.clear();
+  for (const b of snap.bones) manipulatedBones.add(b);
+  manipulatedExpressions.clear();
+  for (const n of snap.exprs) manipulatedExpressions.add(n);
+  if (!vrm) return;
+  for (const [bone, q] of Object.entries(snap.rots)) {
+    const node = getNormNode(vrm, bone);
+    if (node) node.quaternion.set(q[0], q[1], q[2], q[3]);
+  }
+  if (snap.hips) {
+    const node = getNormNode(vrm, 'hips');
+    if (node) node.position.set(snap.hips[0], snap.hips[1], snap.hips[2]);
+  }
+  for (const [name, w] of Object.entries(snap.exprWeights)) {
+    vrm.expressionManager?.setValue(name, w);
+  }
+  vrm.humanoid?.update();
+}

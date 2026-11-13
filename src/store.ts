@@ -193,12 +193,17 @@ function saveUI(ui: UILayout) {
 import type { Bez, Ease, ExprKey, PosKey, Quat, RotKey, VrmaData, Vec3 } from './lib/vrma/parse';
 import { allocKeyId, DEFAULT_BEZ } from './lib/vrma/parse';
 import {
+  applyExpressions,
+  applyPose,
   captureHipsPosition,
+  captureLivePose,
   captureQuat,
   clearManipulated,
   manipulatedBones,
   manipulatedExpressions,
   resetToRestPose,
+  restoreLivePose,
+  type LivePoseSnapshot,
 } from './lib/animation';
 import { BONE_ORDER, BONE_ORDER_INDEX } from './lib/humanoid';
 import { applyExpressionWeight, syncModelEdits } from './lib/vrmedit/live';
@@ -211,6 +216,9 @@ export interface Snapshot {
   exprTracks: Record<string, ExprKey[]>;
   animRestHipsY: number;
   modelEdits: ModelEdits;
+  /** Live (unkeyed) pose — manipulated bones/expressions and their current
+   *  transforms — so undo/redo covers changes that aren't keyed yet. */
+  livePose: LivePoseSnapshot;
 }
 
 // Stroke coalescing for history: continuous inputs (color pickers, sliders,
@@ -388,7 +396,11 @@ interface EditorState {
    *  follows the cursor back exactly. */
   moveKeySnapshot: (snapshot: { track: TrackId; id: number; t: number }[], delta: number) => void;
 
-  beginPoseStroke: () => void;
+  /** Called at the start of a manipulation stroke (gizmo drag, slider
+   *  pointer-down) with the tag its manipulate* calls will use: snapshots the
+   *  pre-stroke state once so the whole stroke is a single undo step —
+   *  whether or not auto-key is going to record it. */
+  beginPoseStroke: (tag?: string) => void;
   manipulateBone: (bone: string, kind?: 'rot' | 'hipsPos' | 'both') => void;
   /** Live edit of an expression weight from the animation UI (Pose tab
    *  sliders): marks it as manipulated (playback sampler skips it) and, with
@@ -925,9 +937,12 @@ export const useEditor = create<EditorState>()((set, get) => ({
   },
 
   // Called at the start of a manipulation stroke (gizmo drag, slider drag):
-  // snapshots history once so the whole stroke is a single undo step.
-  beginPoseStroke: () => {
-    if (get().autoKey) get().pushHistory();
+  // snapshots the pre-stroke state so the whole stroke is a single undo step.
+  // The tagged push coalesces with the stroke's manipulation pushes — and it
+  // is taken unconditionally, so poses are undoable even when auto-key is off
+  // and nothing is keyed ("saved") yet.
+  beginPoseStroke: (tag) => {
+    get().pushHistory(tag);
   },
 
   // Live edit of a normalized bone from the UI (gizmo, sliders). Marks the
@@ -936,6 +951,10 @@ export const useEditor = create<EditorState>()((set, get) => ({
   manipulateBone: (bone, kind) => {
     const st = get();
     if (!st.vrm) return;
+    // Tagged history push: continuous input coalesces into one undo step, and
+    // every path (gizmo, sliders, typed numbers, AI tools) is captured even
+    // when auto-key is off and the pose isn't keyed yet.
+    st.pushHistory(`pose:${bone}`);
     manipulatedBones.add(bone);
     if (st.autoKey) {
       if (kind === 'rot' || kind === 'both') {
@@ -953,6 +972,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   manipulateExpression: (name, weight) => {
     const st = get();
     if (!st.vrm) return;
+    st.pushHistory(`pose:expr:${name}`);
     manipulatedExpressions.add(name);
     if (st.autoKey) st.upsertExprKey(name, weight, { history: false });
     st.bumpPose();
@@ -961,6 +981,9 @@ export const useEditor = create<EditorState>()((set, get) => ({
   resetPose: () => {
     const { vrm, restHipsPos } = get();
     if (!vrm) return;
+    // Undoable from every caller (button, AI tools) — the snapshot keeps the
+    // pre-reset pose including which bones were manipulated.
+    get().pushHistory('pose');
     resetToRestPose(vrm, restHipsPos);
     get().bumpPose();
   },
@@ -985,6 +1008,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         exprTracks: clone(s.exprTracks),
         animRestHipsY: s.animRestHipsY,
         modelEdits: clone(s.modelEdits),
+        livePose: captureLivePose(s.vrm),
       }],
       future: [],
     }));
@@ -994,9 +1018,33 @@ export const useEditor = create<EditorState>()((set, get) => ({
     set((s) => {
       const prev = s.past[s.past.length - 1];
       if (!prev) return s;
-      clearManipulated();
       lastPush = null;
-      if (s.vrm) syncModelEdits(s.vrm, prev.modelEdits, s.modelEdits);
+      // Capture the current live pose BEFORE restoring: restoreLivePose
+      // repopulates the manipulated sets from the snapshot, so capturing
+      // afterwards would record the restored state, not the state redo must
+      // bring back.
+      const livePose = captureLivePose(s.vrm);
+      if (s.vrm) {
+        syncModelEdits(s.vrm, prev.modelEdits, s.modelEdits);
+        // Restore the unkeyed pose of the state being returned to (instead of
+        // the old blanket clearManipulated, which dropped manipulated bones
+        // even when the restored state still had them).
+        restoreLivePose(s.vrm, prev.livePose);
+        // Re-apply the restored animation right away: the poseTick bump below
+        // re-renders the pose-bound UI, which would otherwise read the
+        // pre-undo nodes until the next render-loop tick.
+        const anim = {
+          name: prev.animName,
+          duration: prev.duration,
+          rotTracks: prev.rotTracks,
+          hipsTrack: prev.hipsTrack,
+          exprTracks: prev.exprTracks,
+          restHipsY: prev.animRestHipsY,
+        };
+        const time = Math.min(s.time, prev.duration);
+        applyPose(s.vrm, anim, time, s.restHipsPos, prev.animRestHipsY);
+        applyExpressions(s.vrm, anim, time);
+      }
       return {
         past: s.past.slice(0, -1),
         future: [...s.future, {
@@ -1007,6 +1055,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           exprTracks: clone(s.exprTracks),
           animRestHipsY: s.animRestHipsY,
           modelEdits: clone(s.modelEdits),
+          livePose,
         }],
         animName: prev.animName,
         duration: prev.duration,
@@ -1016,6 +1065,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         animRestHipsY: prev.animRestHipsY,
         modelEdits: prev.modelEdits,
         time: Math.min(s.time, prev.duration),
+        poseTick: s.poseTick + 1,
       };
     }),
 
@@ -1023,9 +1073,25 @@ export const useEditor = create<EditorState>()((set, get) => ({
     set((s) => {
       const next = s.future[s.future.length - 1];
       if (!next) return s;
-      clearManipulated();
       lastPush = null;
-      if (s.vrm) syncModelEdits(s.vrm, next.modelEdits, s.modelEdits);
+      // Same ordering as undo: capture before the restore overwrites the sets.
+      const livePose = captureLivePose(s.vrm);
+      if (s.vrm) {
+        syncModelEdits(s.vrm, next.modelEdits, s.modelEdits);
+        restoreLivePose(s.vrm, next.livePose);
+        // Same as undo: sample the restored state before the UI re-renders.
+        const anim = {
+          name: next.animName,
+          duration: next.duration,
+          rotTracks: next.rotTracks,
+          hipsTrack: next.hipsTrack,
+          exprTracks: next.exprTracks,
+          restHipsY: next.animRestHipsY,
+        };
+        const time = Math.min(s.time, next.duration);
+        applyPose(s.vrm, anim, time, s.restHipsPos, next.animRestHipsY);
+        applyExpressions(s.vrm, anim, time);
+      }
       return {
         future: s.future.slice(0, -1),
         past: [...s.past, {
@@ -1036,6 +1102,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           exprTracks: clone(s.exprTracks),
           animRestHipsY: s.animRestHipsY,
           modelEdits: clone(s.modelEdits),
+          livePose,
         }],
         animName: next.animName,
         duration: next.duration,
@@ -1045,6 +1112,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         animRestHipsY: next.animRestHipsY,
         modelEdits: next.modelEdits,
         time: Math.min(s.time, next.duration),
+        poseTick: s.poseTick + 1,
       };
     }),
 

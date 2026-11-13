@@ -103,7 +103,9 @@ function EulerAxis({ axis }: { axis: 'x' | 'y' | 'z' }) {
         max={180}
         step={0.5}
         value={Number.isFinite(deg) ? deg : 0}
-        onPointerDown={() => useEditor.getState().beginPoseStroke()}
+        onPointerDown={() =>
+          useEditor.getState().beginPoseStroke(selectedBone ? `pose:${selectedBone}` : undefined)
+        }
         onChange={(e) => apply(parseFloat(e.target.value))}
       />
       <input
@@ -149,7 +151,7 @@ function HipsAxis({ axis, index }: { axis: 'x' | 'y' | 'z'; index: 0 | 1 | 2 }) 
         max={1}
         step={0.005}
         value={Number.isFinite(value) ? Math.round(value * 1000) / 1000 : 0}
-        onPointerDown={() => useEditor.getState().beginPoseStroke()}
+        onPointerDown={() => useEditor.getState().beginPoseStroke('pose:hips')}
         onChange={(e) => apply(parseFloat(e.target.value))}
       />
       <input
@@ -315,7 +317,7 @@ function ExpressionsPose() {
                 max={1}
                 step={0.01}
                 value={w}
-                onPointerDown={() => useEditor.getState().beginPoseStroke()}
+                onPointerDown={() => useEditor.getState().beginPoseStroke(`pose:expr:${n}`)}
                 onChange={(e) => apply(n, parseFloat(e.target.value))}
               />
               <span className="ctl-val">{w.toFixed(2)}</span>
@@ -405,7 +407,7 @@ function PoseInspector() {
                   const st = useEditor.getState();
                   const n = st.vrm ? getNormNode(st.vrm, st.selectedBone!) : null;
                   if (!n) return;
-                  st.beginPoseStroke();
+                  st.beginPoseStroke(`pose:${st.selectedBone}`);
                   n.quaternion.identity();
                   st.manipulateBone(st.selectedBone!, 'rot');
                 }}
@@ -463,7 +465,7 @@ function PoseInspector() {
             onClick={() => {
               const st = useEditor.getState();
               if (!st.vrm) return;
-              st.pushHistory();
+              // resetPose snapshots history itself — one entry per reset.
               st.resetPose();
               st.setStatus('info', 'Pose reset to T-pose');
             }}

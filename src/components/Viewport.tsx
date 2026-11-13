@@ -241,7 +241,10 @@ export function Viewport() {
       orbit.enabled = !e.value;
       const st = useEditor.getState();
       if (e.value) {
-        if (st.autoKey) st.pushHistory();
+        // One undo step per gizmo drag: snapshot the pre-drag pose whether or
+        // not auto-key records it. The tag matches manipulateBone's, so the
+        // stroke's own pushes coalesce into this entry.
+        st.beginPoseStroke(st.selectedBone ? `pose:${st.selectedBone}` : undefined);
       } else {
         // Keep the manually posed bone as-is after release: it stays exempt
         // from pose sampling until the playhead time changes. (Clearing the
