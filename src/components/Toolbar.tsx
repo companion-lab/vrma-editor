@@ -139,7 +139,7 @@ export function Toolbar() {
       const bytes = st.originalModelBytes ?? (await (await fetch(st.modelUrl)).arrayBuffer());
       // Re-read after the (possible) fetch so the newest edits go out.
       const cur = useEditor.getState();
-      const out = await exportEditedModel(bytes, cur.modelEdits, cur.modelAssociations);
+      const out = await exportEditedModel(bytes, cur.modelEdits, cur.modelAssociations, cur.worn);
       const blob = new Blob([out], { type: 'model/gltf-binary' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);

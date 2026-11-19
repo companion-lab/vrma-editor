@@ -10,9 +10,14 @@
 import type { VRM } from '@pixiv/three-vrm';
 import { Quaternion, Vector3 } from 'three';
 import { getNormNode } from '../animation';
-import { detectPose, getPoseLandmarker, type PoseFrame } from './pose';
+import { detectPose, getHandLandmarker, getPoseLandmarker, type PoseFrame } from './pose';
 import { retargetFrame, type FrameResult, type RetargetInfo } from './retarget';
 import { cameraPreview, openCamera } from './webcam';
+
+/** Finger bones (thumb/index/middle/ring/little × proximal/intermediate/distal)
+ *  — hand landmarks jitter far more than body landmarks, so they get extra
+ *  preview damping in smoothTo. */
+const FINGER_BONE = /(Proximal|Intermediate|Distal)$/;
 
 export interface LiveOptions {
   /** Preview smoothing, 0..10 (0 = raw tracking). */
@@ -38,6 +43,8 @@ export interface LiveStats {
   elapsed: number;
   /** Frames where a person was detected. */
   detected: number;
+  /** Frames where at least one hand was detected (drives the fingers). */
+  hands: number;
   /** Measured detection rate, fps. */
   fps: number;
 }
@@ -57,6 +64,7 @@ class LiveSession {
   private stopped = false;
   private busy = false;
   private detected = 0;
+  private handFrames = 0;
   private sampled = 0;
   private detectTimes: number[] = [];
   private frames: PoseFrame[] = [];
@@ -85,6 +93,7 @@ class LiveSession {
     const session = new LiveSession(stream, opts);
     session.onStatus?.('Loading the pose-tracking model…');
     await getPoseLandmarker(); // first use downloads ~5 MB from the CDN
+    await getHandLandmarker().catch(() => undefined); // fingers are best-effort
     if (session.stopped) {
       for (const t of stream.getTracks()) t.stop();
       throw new Error('Live tracking was cancelled.');
@@ -120,6 +129,7 @@ class LiveSession {
   private onFrame(frame: PoseFrame | null) {
     if (!frame) return; // no person this frame — hold the last pose
     this.detected++;
+    if (frame.hands?.length) this.handFrames++;
     this.detectTimes.push(performance.now());
     if (this.detectTimes.length > 30) this.detectTimes.shift();
     if (this.capture) this.frames.push(frame);
@@ -136,10 +146,14 @@ class LiveSession {
    *  T-pose flicker on brief occlusion). */
   private smoothTo(r: FrameResult) {
     const a = 1 / (1 + this.smooth * 0.6);
+    // Fingers get extra damping on top of the body setting: their landmarks
+    // buzz at the same smoothing level that leaves the body responsive.
+    const aFinger = 1 / (1 + this.smooth * 0.6 + 3);
     for (const [bone, q] of r.rot) {
+      const alpha = FINGER_BONE.test(bone) ? aFinger : a;
       const prev = this.smoothedRot.get(bone);
       if (!prev) this.smoothedRot.set(bone, q.clone());
-      else prev.slerp(q, a);
+      else prev.slerp(q, alpha);
     }
     if (r.hips) {
       if (!this.hipsRest) this.hipsRest = r.hips.clone();
@@ -171,6 +185,7 @@ class LiveSession {
     return {
       elapsed: (now - this.t0) / 1000,
       detected: this.detected,
+      hands: this.handFrames,
       fps: span > 0 ? this.detectTimes.length / span : 0,
     };
   }

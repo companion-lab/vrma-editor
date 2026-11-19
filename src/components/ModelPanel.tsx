@@ -2,10 +2,11 @@
 // Everything edits the live three.js model for instant preview and records the
 // edit in the store; "Save model" (toolbar) bakes it into the original file.
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { ChevronDown, ChevronRight, Eye, EyeOff, FolderOpen, Image as ImageIcon, RotateCcw, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, EyeOff, FolderOpen, Image as ImageIcon, Plus, RotateCcw, Shirt, X } from 'lucide-react';
 import { useEditor, type ModelEdits, type OutfitPreset } from '../store';
+import { getDonor, loadDonor, WEARABLE_CATEGORIES } from '../lib/wardrobe/sources';
 import {
   applyAllBoneScales,
   applyExpressionWeight,
@@ -309,6 +310,178 @@ function MaterialsSection({ edits }: { edits: ModelEdits }) {
   );
 }
 
+// --- Wardrobe (wear parts from other VRM files) ---
+
+function wornLabel(donor: string, id: string): string {
+  return getDonor(donor)?.parts.find((p) => p.id === id)?.label ?? id;
+}
+
+function WardrobeSection() {
+  const worn = useEditor((s) => s.worn);
+  const library = useEditor((s) => s.wardrobeLibrary);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [parts, setParts] = useState<AssetPart[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    useEditor.getState().fetchWardrobeLibrary();
+  }, []);
+
+  const openDonor = async (name: string, url: string) => {
+    if (selected === name) {
+      setSelected(null);
+      return;
+    }
+    setBusy(name);
+    try {
+      const donor = await loadDonor(name, url);
+      setSelected(name);
+      setParts(donor.parts.filter((p) => WEARABLE_CATEGORIES.includes(p.category)));
+    } catch (err) {
+      console.error(err);
+      useEditor.getState().setStatus('error', `Wardrobe load failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const loadFile = async (file: File) => {
+    setBusy(file.name);
+    try {
+      const donor = await loadDonor(file.name, URL.createObjectURL(file));
+      setSelected(donor.name);
+      setParts(donor.parts.filter((p) => WEARABLE_CATEGORIES.includes(p.category)));
+      useEditor.getState().setStatus('ok', `Wardrobe "${file.name}" loaded`);
+    } catch (err) {
+      console.error(err);
+      useEditor.getState().setStatus('error', `Wardrobe load failed: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Group the selected donor's wearable parts by category.
+  const blocks = useMemo(() => {
+    const list = [...parts].sort(
+      (a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category) || a.label.localeCompare(b.label),
+    );
+    const out: { category: AssetPart['category']; rows: AssetPart[] }[] = [];
+    for (const p of list) {
+      const last = out[out.length - 1];
+      if (last?.category === p.category) last.rows.push(p);
+      else out.push({ category: p.category, rows: [p] });
+    }
+    return out;
+  }, [parts]);
+
+  const isWorn = (donor: string, id: string) => worn.some((w) => w.donor === donor && w.id === id);
+
+  return (
+    <div className="assets-body">
+      <div className="outfit-bar">
+        {library.length > 0 && (
+          <div className="outfit-chips">
+            {library.map((d) => (
+              <button
+                key={d.url}
+                className={`outfit-chip ${selected === d.name ? 'active' : ''}`}
+                title={`Show wearable parts of "${d.name}"`}
+                onClick={() => openDonor(d.name, d.url)}
+              >
+                <Shirt size={11} /> {busy === d.name ? 'loading…' : d.name}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="outfit-save">
+          <button className="btn small" onClick={() => fileRef.current?.click()}>
+            <Plus size={12} /> Load file…
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".vrm,.glb,.gltf"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) loadFile(f);
+              e.target.value = '';
+            }}
+          />
+          {worn.length > 0 && (
+            <button
+              className="btn small"
+              title="Take off everything worn from wardrobe donors"
+              onClick={() => useEditor.getState().clearWorn()}
+            >
+              <X size={12} /> Clear all
+            </button>
+          )}
+        </div>
+      </div>
+
+      {worn.length > 0 && (
+        <div className="outfit-chips">
+          {worn.map((w) => (
+            <span key={`${w.donor}:${w.id}`} className="outfit-chip active">
+              <button
+                className="outfit-apply"
+                title="Take this part off"
+                onClick={() => useEditor.getState().unwearPart(w.donor, w.id)}
+              >
+                {wornLabel(w.donor, w.id)}
+              </button>
+              <button
+                className="outfit-del"
+                title={`Take off "${wornLabel(w.donor, w.id)}"`}
+                onClick={() => useEditor.getState().unwearPart(w.donor, w.id)}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <div className="mesh-list-wrap">
+          <div className="mesh-list">
+            {blocks.length === 0 && <div className="muted pad">No wearable parts in this file.</div>}
+            {blocks.map((b) => (
+              <div key={b.category} className="asset-cat">
+                <div className="asset-cat-head">{CATEGORY_LABEL[b.category]}</div>
+                {b.rows.map((p) => {
+                  const on = isWorn(selected, p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      className={`mesh-row ${on ? 'worn-part' : ''}`}
+                      title={on ? 'Take this part off' : 'Wear this part (hides your model’s own pieces of this kind)'}
+                      onClick={() =>
+                        on
+                          ? useEditor.getState().unwearPart(selected, p.id)
+                          : useEditor.getState().wearPart(selected, p.id, p.category)
+                      }
+                    >
+                      {on ? <Eye size={12} /> : <Shirt size={12} />}
+                      <span className="mesh-name" title={p.label}>{p.label}</span>
+                      {on && <span className="asset-owner">worn</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <div className="muted small-note">
+            picking another model here swaps its clothes / hair onto yours · the look bakes into “Save model”
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Assets (clothes / hair / parts visibility + outfits) ---
 
 interface AssetEntry {
@@ -381,9 +554,12 @@ function OutfitsBar() {
 
 function AssetRow({ entry, edits }: { entry: AssetEntry; edits: ModelEdits }) {
   const vrm = useEditor((s) => s.vrm);
+  const worn = useEditor((s) => s.worn);
   if (!vrm) return null;
   const hiddenList = entry.kind === 'part' ? edits.hiddenParts : edits.hiddenMeshes;
   const isHidden = hiddenList.includes(entry.id);
+  // Same-category originals are hidden because a wardrobe donor part is worn.
+  const wornCategory = worn.some((w) => w.category === entry.category);
 
   const toggle = () => {
     const st = useEditor.getState();
@@ -406,6 +582,7 @@ function AssetRow({ entry, edits }: { entry: AssetEntry; edits: ModelEdits }) {
       {entry.meshName && entry.meshName !== entry.label && (
         <span className="asset-owner">{entry.meshName}</span>
       )}
+      {isHidden && wornCategory && <span className="asset-owner" title="Hidden because a wardrobe part is worn">worn</span>}
     </button>
   );
 }
@@ -635,6 +812,9 @@ export function ModelPanel() {
       </div>
       <Section title="Materials">
         <MaterialsSection edits={edits} />
+      </Section>
+      <Section title="Wardrobe" defaultOpen={false}>
+        <WardrobeSection />
       </Section>
       <Section title="Assets">
         <AssetsSection edits={edits} />

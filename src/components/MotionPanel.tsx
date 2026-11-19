@@ -95,7 +95,11 @@ export function MotionPanel() {
     if (!live) return;
     const tick = () => {
       const s = liveTracker.stats();
-      setLiveStat(s ? `${Math.min(60, s.fps).toFixed(0)} fps · ${s.elapsed.toFixed(1)}s · ${s.detected} frames` : null);
+      setLiveStat(
+        s
+          ? `${Math.min(60, s.fps).toFixed(0)} fps · ${s.elapsed.toFixed(1)}s · ${s.detected} frames · ${s.hands} hand frames`
+          : null,
+      );
     };
     tick();
     const iv = setInterval(tick, 200);
@@ -160,7 +164,7 @@ export function MotionPanel() {
     const clip = retargetPoses(
       res.frames,
       { name, start: 0, duration: res.duration, width: res.width, height: res.height },
-      { smooth, reductionDeg: 2 },
+      { smooth: liveSmooth, reductionDeg: 2 },
     );
     const keys = Object.values(clip.tracks).reduce((n, k) => n + k, 0) + clip.hipsKeys;
     const s = useEditor.getState();
@@ -258,8 +262,9 @@ export function MotionPanel() {
       <div className="panel-body">
         {!live && (
           <div className="muted small">
-            Track yourself with the webcam — the loaded model moves in real time. Nothing is recorded; with capture on,
-            stopping imports the take as the current animation. Runs in-browser (MediaPipe).
+            Track yourself with the webcam — the loaded model moves in real time, fingers included (when the hands are
+            visible to the camera). Nothing is recorded; with capture on, stopping imports the take as the current
+            animation. Runs in-browser (MediaPipe).
           </div>
         )}
 

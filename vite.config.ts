@@ -22,8 +22,9 @@ function listAssets(): Plugin {
   return {
     name: 'list-assets',
     configureServer(server) {
-      server.middlewares.use('/api/models', listing('models', /\.(vrm|glb|gltf)$/i));
-      server.middlewares.use('/api/textures', listing('textures', /\.(png|jpe?g|webp)$/i));
+    server.middlewares.use('/api/models', listing('models', /\.(vrm|glb|gltf)$/i));
+    server.middlewares.use('/api/textures', listing('textures', /\.(png|jpe?g|webp)$/i));
+    server.middlewares.use('/api/wardrobe', listing('wardrobe', /\.(vrm|glb|gltf)$/i));
     },
   };
 }

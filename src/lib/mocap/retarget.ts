@@ -14,10 +14,18 @@
 // depth is relative, so hips translation is recovered from image landmarks in
 // the screen plane only (vertical bob + lateral sway); forward/backward hip
 // travel is not recoverable and stays at 0.
+//
+// Fingers: MediaPipe's hand landmarker (21 landmarks per hand, up to two
+// hands) runs alongside the pose landmarker. Each detected hand is matched to
+// a body wrist by image-space proximity — the hand model's own handedness
+// label assumes a mirrored input, which raw webcam frames are not. Finger
+// segments swing from their canonical rest direction (along the arm; thumb
+// forward in the palm-down T-pose) expressed in the owning bone's accumulated
+// frame, like every other bone.
 
 import { Matrix4, Quaternion, Vector3 } from 'three';
 import { allocKeyId, type PosKey, type RotKey, type VrmaData } from '../vrma/parse';
-import type { MocapLandmark, PoseFrame } from './pose';
+import type { HandFrame, MocapLandmark, PoseFrame } from './pose';
 
 // BlazePose landmark indices.
 const NOSE = 0;
@@ -38,6 +46,19 @@ const RIGHT_ANKLE = 28;
 const LEFT_TOE = 31;
 const RIGHT_TOE = 32;
 
+// HandLandmarker landmark indices (21 points per hand).
+const HAND_WRIST = 0;
+/** Per finger: the four joints root→tip. The thumb starts at the CMC joint,
+ *  the other fingers at the MCP knuckle. */
+const FINGER_CHAINS = [
+  ['Thumb', 1, 2, 3, 4],
+  ['Index', 5, 6, 7, 8],
+  ['Middle', 9, 10, 11, 12],
+  ['Ring', 13, 14, 15, 16],
+  ['Little', 17, 18, 19, 20],
+] as const;
+const FINGER_PARTS = ['Proximal', 'Intermediate', 'Distal'] as const;
+
 /** A bone segment is keyed only when both landmarks are this visible. */
 const VIS_MIN = 0.5;
 
@@ -46,7 +67,7 @@ const REST_LEFT = new Vector3(1, 0, 0); // +X = model's left
 const REST_RIGHT = new Vector3(-1, 0, 0);
 const REST_UP = new Vector3(0, 1, 0);
 const REST_DOWN = new Vector3(0, -1, 0);
-const REST_FWD = new Vector3(0, 0, 1);
+const REST_FWD = new Vector3(0, 0, 1); // toes AND thumbs (palm-down T-pose) point forward
 
 export interface RetargetInfo {
   /** Clip name (usually the video file name). */
@@ -232,7 +253,9 @@ export function retargetFrame(frame: PoseFrame, info: RetargetInfo, prevMirror: 
       W.set(`${side}UpperArm`, (W.get('chest') ?? new Quaternion()).clone().multiply(q));
       if (pairOk(E, Wr)) {
         const dir2 = v(Wr).sub(v(E)).normalize().applyQuaternion(inv(`${side}UpperArm`));
-        rot.set(`${side}LowerArm`, swing(rest, dir2));
+        const q2 = swing(rest, dir2);
+        rot.set(`${side}LowerArm`, q2);
+        W.set(`${side}LowerArm`, W.get(`${side}UpperArm`)!.clone().multiply(q2));
       }
     }
   }
@@ -255,6 +278,55 @@ export function retargetFrame(frame: PoseFrame, info: RetargetInfo, prevMirror: 
         if (pairOk(A, T)) {
           const dir3 = v(T).sub(v(A)).normalize().applyQuaternion(inv(`${side}LowerLeg`));
           rot.set(`${side}Foot`, swing(REST_FWD, dir3));
+        }
+      }
+    }
+  }
+
+  // Fingers: match each detected hand to a body wrist by image-space proximity
+  // (the hand model's handedness label assumes mirrored input — see header),
+  // then swing each finger segment from its canonical rest direction expressed
+  // in the owning bone's accumulated frame: the proximal segment hangs off the
+  // side's lowerArm, the rest chain down the finger. Uses prevMirror so finger
+  // directions stay in the same frame as the arm bones they attach to.
+  if (frame.hands?.length) {
+    const handDist = (h: HandFrame, wIdx: number) => {
+      const dx = (h.image[HAND_WRIST].x - image[wIdx].x) * info.width;
+      const dy = (h.image[HAND_WRIST].y - image[wIdx].y) * info.height;
+      return dx * dx + dy * dy;
+    };
+    const dL = frame.hands.map((h) => handDist(h, LEFT_WRIST));
+    const dR = frame.hands.map((h) => handDist(h, RIGHT_WRIST));
+    // Optimal wrist assignment for the ≤2 detected hands (one hand → nearest
+    // wrist; two hands → the pairing with the lower total distance).
+    const swap = frame.hands.length === 2 && dL[0] + dR[1] > dL[1] + dR[0];
+    for (let hi = 0; hi < frame.hands.length; hi++) {
+      const side =
+        frame.hands.length === 1
+          ? dL[0] <= dR[0]
+            ? 'left'
+            : 'right'
+          : (hi === 0) !== swap
+            ? 'left'
+            : 'right';
+      if (!W.has(`${side}LowerArm`)) continue; // arm unmeasured this frame — nothing to anchor to
+      const hand = frame.hands[hi];
+      const hw = (i: number) => toCanonical(hand.world[i], prevMirror);
+      for (const [name, j0, j1, j2, j3] of FINGER_CHAINS) {
+        const rest = name === 'Thumb' ? REST_FWD : side === 'left' ? REST_LEFT : REST_RIGHT;
+        // Each finger chains down from the wrist (not from the previous finger).
+        let parentW = W.get(`${side}LowerArm`)!.clone();
+        const segs = [
+          [j0, j1],
+          [j1, j2],
+          [j2, j3],
+        ];
+        for (let s = 0; s < segs.length; s++) {
+          const dir = hw(segs[s][1]).sub(hw(segs[s][0]));
+          if (dir.lengthSq() < 1e-10) continue; // coincident landmarks — hold this segment
+          const q = swing(rest, dir.applyQuaternion(parentW.clone().invert()));
+          rot.set(`${side}${name}${FINGER_PARTS[s]}`, q);
+          parentW.multiply(q); // next segment hangs off this one
         }
       }
     }

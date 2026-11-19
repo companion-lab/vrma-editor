@@ -290,10 +290,31 @@ function normalizeVrmaData(v: unknown): VrmaData {
   };
 }
 
-function toolSetAnimation(args: { animation?: unknown }) {
+function toolSetAnimation(args: { animation?: unknown; groundFeet?: unknown }) {
   const data = normalizeVrmaData(args.animation);
   useEditor.getState().importAnim(data);
-  return { applied: true, name: data.name, duration: data.duration };
+  const out: Record<string, unknown> = { applied: true, name: data.name, duration: data.duration };
+  // Feet on the ground by default: re-solve the hips height from the leg
+  // poses so the lowest foot/toe rests on the floor for the whole loop.
+  // Opt out for airborne motion (jumps, sitting) via groundFeet: false.
+  if (args.groundFeet !== false) {
+    const g = useEditor.getState().groundFeet();
+    if (g) out.grounded = { hipsKeys: g.hipsKeys, maxDropM: +g.maxDrop.toFixed(3), maxLiftM: +g.maxLift.toFixed(3) };
+  }
+  return out;
+}
+
+function toolGroundFeet() {
+  requireVrm();
+  const g = useEditor.getState().groundFeet();
+  if (!g) {
+    throw new ToolError('Could not ground the animation: the model has no foot/toe bones to measure.');
+  }
+  return {
+    grounded: true,
+    alreadyGrounded: g.maxDrop < 0.001 && g.maxLift < 0.001,
+    ...g,
+  };
 }
 
 function toolNewAnimation(args: { name?: unknown; duration?: unknown }) {
@@ -825,6 +846,7 @@ const IMPLS: Record<string, ToolImpl> = {
   new_animation: (a) => toolNewAnimation(a as never),
   add_rotation_key: (a) => toolAddRotationKey(a as never),
   add_hips_key: (a) => toolAddHipsKey(a as never),
+  ground_feet: () => toolGroundFeet(),
   add_expression_key: (a) => toolAddExpressionKey(a as never),
   clear_track: (a) => toolClearTrack(a as never),
   move_key: (a) => toolMoveKey(a as never),

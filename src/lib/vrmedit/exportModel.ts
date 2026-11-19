@@ -5,6 +5,8 @@
 
 import type { MaterialEdit, ModelEdits } from '../../store';
 import { BONE_ORDER } from '../humanoid';
+import { bakeWornParts } from '../wardrobe/bake';
+import type { WornRef } from '../wardrobe/wear';
 import { appendImage, copyBin, mimeTypeFor, parseGlb, writeGlb } from './glb';
 import { parsePartId } from './parts';
 import { COMPENSATE_CHILD_SCALE, LENGTH_AXIS_CHILD, THICKEN_BONES } from './proportions';
@@ -50,13 +52,18 @@ export async function exportEditedModel(
   bytes: ArrayBuffer,
   edits: ModelEdits,
   associations?: ModelAssociations | null,
+  worn?: WornRef[],
 ): Promise<ArrayBuffer> {
   const { json, bin } = parseGlb(bytes);
-  const binBuf = await applyMaterialEdits(json, copyBin(bin), edits, associations);
+  let binBuf = await applyMaterialEdits(json, copyBin(bin), edits, associations);
   applyHiddenParts(json, edits.hiddenParts);
   applyHiddenMeshes(json, edits.hiddenMeshes, associations);
   applyExpressionEdits(json, edits.expressions);
   applyMetaEdits(json, edits.meta);
+  // Worn wardrobe parts merge in BEFORE the bone-scale edits: their inverse
+  // binds are computed against the file's rest pose (exactly what the live
+  // preview binds against), and proportion scaling then rides the joints.
+  binBuf = bakeWornParts(json, binBuf, worn ?? []);
   applyBoneScaleEdits(json, edits.boneScale);
   return writeGlb(json, binBuf);
 }

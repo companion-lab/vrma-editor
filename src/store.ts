@@ -103,6 +103,8 @@ export interface OutfitPreset {
   name: string;
   hiddenMeshes: string[];
   hiddenParts: string[];
+  /** Worn wardrobe parts captured with the outfit (undefined in old presets). */
+  worn?: WornRef[];
 }
 
 const OUTFITS_KEY = 'vrma-editor-outfits';
@@ -207,6 +209,9 @@ import {
 } from './lib/animation';
 import { BONE_ORDER, BONE_ORDER_INDEX } from './lib/humanoid';
 import { applyExpressionWeight, syncModelEdits } from './lib/vrmedit/live';
+import { applyAssetVisibilityAll, type PartCategory, type PartId } from './lib/vrmedit/parts';
+import { computeReplaced, detachAllWorn, syncWorn, type WornRef } from './lib/wardrobe/wear';
+import { bakeGroundFeet } from './lib/ground';
 
 export interface Snapshot {
   animName: string;
@@ -216,6 +221,8 @@ export interface Snapshot {
   exprTracks: Record<string, ExprKey[]>;
   animRestHipsY: number;
   modelEdits: ModelEdits;
+  /** Worn wardrobe parts — restored together with the hidden lists they hide. */
+  worn: WornRef[];
   /** Live (unkeyed) pose — manipulated bones/expressions and their current
    *  transforms — so undo/redo covers changes that aren't keyed yet. */
   livePose: LivePoseSnapshot;
@@ -234,6 +241,11 @@ export const EXPR_TRACK_PREFIX = 'expr:';
 export const isExprTrack = (track: TrackId) => track.startsWith(EXPR_TRACK_PREFIX);
 export const exprTrackId = (name: string) => EXPR_TRACK_PREFIX + name;
 export const exprNameOf = (track: TrackId) => track.slice(EXPR_TRACK_PREFIX.length);
+
+/** Copied keyframes: one entry per source track, key times re-anchored to the
+ *  block start (the earliest copied key) so paste offsets the whole block
+ *  from the playhead while preserving spacing. */
+export type KeyClipboard = { track: TrackId; keys: (RotKey | PosKey | ExprKey)[] }[];
 
 /** Static (rest-face) weight an expression falls back to when its animation
  *  track disappears: the model edit if any, else the file's baked value. */
@@ -268,6 +280,11 @@ interface EditorState {
   modelEdits: ModelEdits;
   /** Saved outfit presets, keyed by model name (see the Assets panel). */
   outfits: OutfitStore;
+  /** Wardrobe library entries (assets/wardrobe listing, like the model library). */
+  wardrobeLibrary: { name: string; url: string }[];
+  /** Parts currently worn from wardrobe donors. Part of undo/history; the
+   *  same-category originals it hides live in modelEdits' hidden lists. */
+  worn: WornRef[];
   /** Meta fields (original file's schema) + current values, captured at load. */
   modelMeta: { fields: string[]; values: Record<string, string> } | null;
   /** Exact glTF indices captured at load (parser.associations) — export uses
@@ -310,6 +327,9 @@ interface EditorState {
   /** Multi-key selection (time-range marquee / Alt+click column). selectedKey
    *  stays the primary; dragging any selected key moves them all together. */
   selectedKeys: { track: TrackId; id: number }[];
+  /** Copied keyframes (copy/cut) — the source for pasteKeys. Not part of
+   *  undo/history: it is scratch content, not editor state. */
+  keyClipboard: KeyClipboard | null;
   poseTick: number; // bumped to re-render pose-bound UI while dragging
 
   // misc
@@ -337,6 +357,10 @@ interface EditorState {
   setModelLoading: (v: boolean) => void;
   fetchModelLibrary: () => Promise<void>;
   fetchTextureLibrary: () => Promise<void>;
+  fetchWardrobeLibrary: () => Promise<void>;
+  wearPart: (donor: string, id: PartId, category: PartCategory) => void;
+  unwearPart: (donor: string, id: PartId) => void;
+  clearWorn: () => void;
   openLibraryModel: (name: string) => void;
   setOriginalModelBytes: (bytes: ArrayBuffer | null) => void;
   setModelMeta: (meta: { fields: string[]; values: Record<string, string> } | null) => void;
@@ -396,6 +420,19 @@ interface EditorState {
    *  follows the cursor back exactly. */
   moveKeySnapshot: (snapshot: { track: TrackId; id: number; t: number }[], delta: number) => void;
 
+  /** Copy the selected keyframes (the multi-selection, or the primary one)
+   *  onto the internal clipboard. Returns true when anything was copied. */
+  copySelectedKeys: () => boolean;
+  /** Paste the clipboard's keyframe block anchored at the snapped playhead
+   *  (pulled back so the block fits the clip). Keys landing on an existing
+   *  key's time overwrite it (the upsert rule). One undo step; selects the
+   *  pasted keys. */
+  pasteKeys: () => void;
+  /** Copy the selection, then delete it — one undo step (via the delete). */
+  cutSelectedKeys: () => void;
+  /** Select every keyframe of every track (rotations, hips, expressions). */
+  selectAllKeys: () => void;
+
   /** Called at the start of a manipulation stroke (gizmo drag, slider
    *  pointer-down) with the tag its manipulate* calls will use: snapshots the
    *  pre-stroke state once so the whole stroke is a single undo step —
@@ -432,9 +469,43 @@ interface EditorState {
   getAnimData: () => VrmaData;
   importAnim: (data: VrmaData) => void;
   newAnim: () => void;
+  /** Re-solve the hips height track so the lowest foot/toe rests on the
+   *  ground across the whole animation. Null when there is no model or no
+   *  foot/toe bones to measure. One undo step. */
+  groundFeet: () => { sampled: number; maxDrop: number; maxLift: number; hipsKeys: number } | null;
 }
 
 const clone = <T,>(v: T): T => structuredClone(v);
+
+/** Merge copied keys into one track at `anchor` + each key's normalized time.
+ *  An existing key at the same time (|Δt| < 1e-6 — the upsert rule the key
+ *  buttons use) keeps its id but takes the copied value + ease; new keys get
+ *  fresh ids. Appends the surviving key refs to `out` and keeps the track
+ *  sorted, so the caller can select what was pasted. */
+function mergePastedKeys<K extends { id: number; t: number }>(
+  list: K[],
+  copied: K[],
+  anchor: number,
+  track: TrackId,
+  out: { track: TrackId; id: number }[],
+): K[] {
+  const next = [...list];
+  for (const k of copied) {
+    const t = anchor + k.t;
+    const existing = next.findIndex((e) => Math.abs(e.t - t) < 1e-6);
+    let id: number;
+    if (existing >= 0) {
+      id = next[existing].id;
+      next[existing] = { ...k, t, id };
+    } else {
+      id = allocKeyId();
+      next.push({ ...k, t, id });
+    }
+    out.push({ track, id });
+  }
+  next.sort((a, b) => a.t - b.t);
+  return next;
+}
 
 const DEFAULT_DURATION = 5;
 
@@ -453,6 +524,8 @@ export const useEditor = create<EditorState>()((set, get) => ({
   originalModelBytes: null,
   modelEdits: clone(EMPTY_EDITS),
   outfits: loadOutfits(),
+  wardrobeLibrary: [],
+  worn: [],
   modelMeta: null,
   modelAssociations: null,
   modelBakedExpressions: {},
@@ -478,6 +551,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   selectedBones: [],
   selectedKey: null,
   selectedKeys: [],
+  keyClipboard: null,
   poseTick: 0,
 
   status: null,
@@ -571,8 +645,9 @@ export const useEditor = create<EditorState>()((set, get) => ({
     if (url) saveLastModel(url, name);
     // A different model invalidates all live edits, the cached original, and
     // the undo stack (restoring the old model's edits/tracks onto the new one
-    // would be wrong).
+    // would be wrong). Worn donor scenes detach with it.
     lastPush = null;
+    detachAllWorn();
     set({
       modelUrl: url,
       modelName: name,
@@ -584,6 +659,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       modelAssociations: null,
       modelBakedExpressions: {},
       rightTab: 'pose',
+      worn: [],
       past: [],
       future: [],
     });
@@ -598,6 +674,10 @@ export const useEditor = create<EditorState>()((set, get) => ({
 
   fetchTextureLibrary: async () => {
     set({ textureLibrary: await listLibrary('/api/textures', '/textures') });
+  },
+
+  fetchWardrobeLibrary: async () => {
+    set({ wardrobeLibrary: await listLibrary('/api/wardrobe', '/wardrobe') });
   },
 
   openLibraryModel: (name) => {
@@ -666,13 +746,14 @@ export const useEditor = create<EditorState>()((set, get) => ({
   outfitsFor: () => get().outfits[get().modelName] ?? { presets: [] },
 
   saveOutfit: (name) => {
-    const { modelName, modelEdits } = get();
+    const { modelName, modelEdits, worn } = get();
     const trimmed = name.trim();
     if (!trimmed) return;
     const preset: OutfitPreset = {
       name: trimmed,
       hiddenMeshes: [...modelEdits.hiddenMeshes],
       hiddenParts: [...modelEdits.hiddenParts],
+      worn: worn.map((w) => ({ ...w })),
     };
     set((s) => {
       const forModel = s.outfits[modelName] ?? { presets: [] };
@@ -686,17 +767,26 @@ export const useEditor = create<EditorState>()((set, get) => ({
   },
 
   applyOutfit: (name) => {
-    const { modelName } = get();
+    const { modelName, vrm } = get();
     const preset = get().outfitsFor().presets.find((p) => p.name === name);
     if (!preset) return null;
     get().pushHistory();
+    // Old presets have no worn list — keep whatever is currently worn.
+    const worn = preset.worn ? preset.worn.map((w) => ({ ...w })) : get().worn;
+    // Same-category originals of worn parts hide on top of the preset's lists.
+    const replaced = computeReplaced(vrm, worn);
+    const hiddenMeshes = [...preset.hiddenMeshes, ...replaced.replacedMeshes.filter((n) => !preset.hiddenMeshes.includes(n))];
+    const hiddenParts = [...preset.hiddenParts, ...replaced.replacedParts.filter((p) => !preset.hiddenParts.includes(p))];
     set((s) => ({
       modelEdits: {
         ...s.modelEdits,
-        hiddenMeshes: [...preset.hiddenMeshes],
-        hiddenParts: [...preset.hiddenParts],
+        hiddenMeshes,
+        hiddenParts,
       },
+      worn,
     }));
+    syncWorn(vrm, worn);
+    if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
     const outfits = { ...get().outfits, [modelName]: { ...get().outfits[modelName]!, last: name } };
     saveOutfits(outfits);
     set({ outfits });
@@ -714,6 +804,74 @@ export const useEditor = create<EditorState>()((set, get) => ({
       saveOutfits(outfits);
       return { outfits };
     });
+  },
+
+  // --- Wardrobe (wearing donor parts) ---
+  //
+  // Wearing a donor part hides the target's own same-category parts by adding
+  // them to modelEdits' hidden lists (so export removes them, outfit presets
+  // capture them and undo covers the change). Each WornRef records exactly the
+  // ids ITS wear action added, so unwearing restores precisely and overlapping
+  // wears (two donor hairs) only unhide when the last one is removed.
+
+  wearPart: (donor, id, category) => {
+    const { vrm, worn: prev, modelEdits } = get();
+    if (prev.some((w) => w.donor === donor && w.id === id)) return;
+    get().pushHistory();
+    const worn = [...prev, { donor, id, category, replacedMeshes: [], replacedParts: [] }];
+    const entry = worn[worn.length - 1];
+    const replaced = computeReplaced(vrm, worn);
+    // Record only ids this wear actually added (idempotent vs manual hides).
+    entry.replacedMeshes = replaced.replacedMeshes.filter((n) => !modelEdits.hiddenMeshes.includes(n));
+    entry.replacedParts = replaced.replacedParts.filter((p) => !modelEdits.hiddenParts.includes(p));
+    set((s) => ({
+      worn,
+      modelEdits: {
+        ...s.modelEdits,
+        hiddenMeshes: [...s.modelEdits.hiddenMeshes, ...entry.replacedMeshes],
+        hiddenParts: [...s.modelEdits.hiddenParts, ...entry.replacedParts],
+      },
+    }));
+    syncWorn(vrm, worn);
+    if (vrm) applyAssetVisibilityAll(vrm, get().modelEdits.hiddenMeshes, get().modelEdits.hiddenParts);
+  },
+
+  unwearPart: (donor, id) => {
+    const { vrm, worn: prev, modelEdits } = get();
+    const entry = prev.find((w) => w.donor === donor && w.id === id);
+    if (!entry) return;
+    get().pushHistory();
+    const remaining = prev.filter((w) => !(w.donor === donor && w.id === id));
+    // final hidden = current hidden MINUS what this wear added, UNION what the
+    // remaining worn parts still replace.
+    const still = computeReplaced(vrm, remaining);
+    const keptMeshes = modelEdits.hiddenMeshes.filter((n) => !entry.replacedMeshes.includes(n));
+    const keptParts = modelEdits.hiddenParts.filter((p) => !entry.replacedParts.includes(p));
+    const hiddenMeshes = [...keptMeshes, ...still.replacedMeshes.filter((n) => !keptMeshes.includes(n))];
+    const hiddenParts = [...keptParts, ...still.replacedParts.filter((p) => !keptParts.includes(p))];
+    set((s) => ({
+      worn: remaining,
+      modelEdits: { ...s.modelEdits, hiddenMeshes, hiddenParts },
+    }));
+    syncWorn(vrm, remaining);
+    if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
+  },
+
+  clearWorn: () => {
+    const { vrm, worn: prev, modelEdits } = get();
+    if (prev.length === 0) return;
+    get().pushHistory();
+    // Remove every hide any worn entry added.
+    const addedMeshes = new Set(prev.flatMap((w) => w.replacedMeshes));
+    const addedParts = new Set(prev.flatMap((w) => w.replacedParts));
+    const hiddenMeshes = modelEdits.hiddenMeshes.filter((n) => !addedMeshes.has(n));
+    const hiddenParts = modelEdits.hiddenParts.filter((p) => !addedParts.has(p));
+    set((s) => ({
+      worn: [],
+      modelEdits: { ...s.modelEdits, hiddenMeshes, hiddenParts },
+    }));
+    syncWorn(vrm, []);
+    if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
   },
 
   setExpressionEdit: (name, weight) => {
@@ -890,6 +1048,149 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return { selectedKeys: next, selectedKey: next[next.length - 1] ?? null };
     }),
 
+  // Ctrl/Cmd+C: copy the selected keyframes (marquee multi-selection, or just
+  // the primary one) onto the internal clipboard, grouped by track with times
+  // re-anchored to the earliest copied key so paste offsets the whole block
+  // from the playhead. Stale refs (key deleted since selection) are skipped.
+  copySelectedKeys: () => {
+    const s = get();
+    const refs = s.selectedKeys.length > 0 ? s.selectedKeys : s.selectedKey ? [s.selectedKey] : [];
+    if (refs.length === 0) {
+      s.setStatus('info', 'Nothing to copy — select keyframes on the timeline first');
+      return false;
+    }
+    // Resolve each ref to its key object, grouped by track (the same inline
+    // lookup the other bulk actions use).
+    let t0 = Infinity;
+    const picked = new Map<TrackId, (RotKey | PosKey | ExprKey)[]>();
+    const pick = (track: TrackId, keys: (RotKey | PosKey | ExprKey)[] | undefined) => {
+      if (!keys) return;
+      for (const r of refs) {
+        if (r.track !== track) continue;
+        const k = keys.find((q) => q.id === r.id);
+        if (!k) continue;
+        t0 = Math.min(t0, k.t);
+        const list = picked.get(track);
+        if (list) list.push(k);
+        else picked.set(track, [k]);
+      }
+    };
+    for (const [bone, keys] of Object.entries(s.rotTracks)) pick(bone, keys);
+    pick(HIPS_TRACK_ID, s.hipsTrack);
+    for (const [name, keys] of Object.entries(s.exprTracks)) pick(exprTrackId(name), keys);
+    if (picked.size === 0) {
+      s.setStatus('info', 'Nothing to copy — the selected keyframes no longer exist');
+      return false;
+    }
+    const clipboard: KeyClipboard = [];
+    for (const [track, keys] of picked) {
+      clipboard.push({
+        track,
+        keys: keys
+          .map((k) => {
+            const c = clone(k);
+            c.t -= t0;
+            return c;
+          })
+          .sort((a, b) => a.t - b.t),
+      });
+    }
+    set({ keyClipboard: clipboard });
+    const total = clipboard.reduce((n, t) => n + t.keys.length, 0);
+    s.setStatus(
+      'ok',
+      `Copied ${total} key${total === 1 ? '' : 's'} from ${picked.size} track${picked.size === 1 ? '' : 's'}`,
+    );
+    return true;
+  },
+
+  // Ctrl/Cmd+V: paste the clipboard block anchored at the snapped playhead,
+  // pulled back so the block fits inside the clip (same block-clamp rule as
+  // moveKeySnapshot). One untagged history push — a paste is exactly one undo
+  // step — then a single set() that upserts every pasted key and selects them.
+  pasteKeys: () => {
+    const s = get();
+    const clip = s.keyClipboard;
+    if (!clip || clip.length === 0) {
+      s.setStatus('info', 'Clipboard is empty — copy keyframes first');
+      return;
+    }
+    let span = 0;
+    for (const t of clip) for (const k of t.keys) span = Math.max(span, k.t);
+    const anchor = Math.max(0, Math.min(s.snapTime(s.time), s.duration - span));
+    s.pushHistory();
+    const pastedRefs: { track: TrackId; id: number }[] = [];
+    set((st) => {
+      let hipsTrack = st.hipsTrack;
+      let rotTracks: Partial<Record<string, RotKey[]>> | null = null;
+      let exprTracks: Record<string, ExprKey[]> | null = null;
+      for (const { track, keys } of clip) {
+        if (track === HIPS_TRACK_ID) {
+          hipsTrack = mergePastedKeys(hipsTrack, keys as PosKey[], anchor, track, pastedRefs);
+        } else if (isExprTrack(track)) {
+          const name = exprNameOf(track);
+          exprTracks = exprTracks ?? { ...st.exprTracks };
+          // Pasting an expression track that no longer exists recreates it.
+          exprTracks[name] = mergePastedKeys(
+            exprTracks[name] ?? [],
+            keys as ExprKey[],
+            anchor,
+            track,
+            pastedRefs,
+          );
+        } else {
+          rotTracks = rotTracks ?? { ...st.rotTracks };
+          rotTracks[track] = mergePastedKeys(
+            rotTracks[track] ?? [],
+            keys as RotKey[],
+            anchor,
+            track,
+            pastedRefs,
+          );
+        }
+      }
+      return {
+        hipsTrack,
+        ...(rotTracks ? { rotTracks } : {}),
+        ...(exprTracks ? { exprTracks } : {}),
+        selectedKeys: pastedRefs,
+        selectedKey: pastedRefs[0] ?? null,
+      };
+    });
+    const total = pastedRefs.length;
+    if (total > 0) {
+      s.setStatus(
+        'ok',
+        `Pasted ${total} key${total === 1 ? '' : 's'} at ${anchor.toFixed(2)}s`,
+      );
+    }
+  },
+
+  // Ctrl/Cmd+X: copy, then delete the selection. The delete pushes the (one)
+  // history entry; copy pushes none — so a cut is a single undo step.
+  cutSelectedKeys: () => {
+    if (get().copySelectedKeys()) get().deleteSelectedKey();
+  },
+
+  // Ctrl/Cmd+A: every keyframe of every track — rotations, hips, expressions.
+  selectAllKeys: () => {
+    const s = get();
+    const refs: { track: TrackId; id: number }[] = [];
+    for (const [bone, keys] of Object.entries(s.rotTracks)) {
+      for (const k of keys ?? []) refs.push({ track: bone, id: k.id });
+    }
+    for (const k of s.hipsTrack) refs.push({ track: HIPS_TRACK_ID, id: k.id });
+    for (const [name, keys] of Object.entries(s.exprTracks)) {
+      for (const k of keys) refs.push({ track: exprTrackId(name), id: k.id });
+    }
+    if (refs.length === 0) {
+      s.setStatus('info', 'No keyframes to select');
+      return;
+    }
+    set({ selectedKeys: refs, selectedKey: refs[0] });
+    s.setStatus('ok', `Selected all ${refs.length} key${refs.length === 1 ? '' : 's'}`);
+  },
+
   // Group drag: every key in the snapshot (times captured at drag start) is
   // placed at snapshot.t + delta — shifted as one block, spacing preserved,
   // clamped to the clip, re-sorted per track. Because the delta is always
@@ -1008,6 +1309,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         exprTracks: clone(s.exprTracks),
         animRestHipsY: s.animRestHipsY,
         modelEdits: clone(s.modelEdits),
+        worn: clone(s.worn),
         livePose: captureLivePose(s.vrm),
       }],
       future: [],
@@ -1026,6 +1328,9 @@ export const useEditor = create<EditorState>()((set, get) => ({
       const livePose = captureLivePose(s.vrm);
       if (s.vrm) {
         syncModelEdits(s.vrm, prev.modelEdits, s.modelEdits);
+        // Worn donors follow the restored hidden lists (their scenes attach /
+        // detach and their own part visibility updates here).
+        syncWorn(s.vrm, prev.worn);
         // Restore the unkeyed pose of the state being returned to (instead of
         // the old blanket clearManipulated, which dropped manipulated bones
         // even when the restored state still had them).
@@ -1055,6 +1360,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           exprTracks: clone(s.exprTracks),
           animRestHipsY: s.animRestHipsY,
           modelEdits: clone(s.modelEdits),
+          worn: clone(s.worn),
           livePose,
         }],
         animName: prev.animName,
@@ -1064,6 +1370,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         exprTracks: prev.exprTracks,
         animRestHipsY: prev.animRestHipsY,
         modelEdits: prev.modelEdits,
+        worn: prev.worn,
         time: Math.min(s.time, prev.duration),
         poseTick: s.poseTick + 1,
       };
@@ -1078,6 +1385,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       const livePose = captureLivePose(s.vrm);
       if (s.vrm) {
         syncModelEdits(s.vrm, next.modelEdits, s.modelEdits);
+        syncWorn(s.vrm, next.worn);
         restoreLivePose(s.vrm, next.livePose);
         // Same as undo: sample the restored state before the UI re-renders.
         const anim = {
@@ -1102,6 +1410,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           exprTracks: clone(s.exprTracks),
           animRestHipsY: s.animRestHipsY,
           modelEdits: clone(s.modelEdits),
+          worn: clone(s.worn),
           livePose,
         }],
         animName: next.animName,
@@ -1111,6 +1420,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         exprTracks: next.exprTracks,
         animRestHipsY: next.animRestHipsY,
         modelEdits: next.modelEdits,
+        worn: next.worn,
         time: Math.min(s.time, next.duration),
         poseTick: s.poseTick + 1,
       };
@@ -1503,6 +1813,19 @@ export const useEditor = create<EditorState>()((set, get) => ({
       selectedKey: null,
       selectedKeys: [],
     });
+  },
+
+  groundFeet: () => {
+    const { vrm, restHipsPos, restFeetY, modelEdits } = get();
+    if (!vrm) return null;
+    const res = bakeGroundFeet(vrm, get().getAnimData(), restHipsPos, restFeetY, modelEdits.boneScale);
+    if (res.sampled === 0) return null;
+    get().pushHistory();
+    set({ hipsTrack: res.hipsTrack });
+    const cm = (m: number) => `${(m * 100).toFixed(1)}cm`;
+    const what = res.maxDrop > 0.001 ? `lowered by up to ${cm(res.maxDrop)}` : res.maxLift > 0.001 ? `raised by up to ${cm(res.maxLift)}` : 'already grounded';
+    get().setStatus('ok', `Feet planted on the ground — hips ${what}.`);
+    return { sampled: res.sampled, maxDrop: res.maxDrop, maxLift: res.maxLift, hipsKeys: res.hipsTrack.length };
   },
 
   newAnim: () => {

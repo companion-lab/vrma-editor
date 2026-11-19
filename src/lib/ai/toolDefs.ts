@@ -69,12 +69,17 @@ const getAnimation = obj(
 );
 
 const setAnimation = obj(
-  'Replace the whole animation with a JSON animation object (same shape get_animation returns). Use this to author a complete animation in one step. Provide name, duration, restHipsY (use get_state restHipsY of the current model) and tracks. Key ids are optional (auto-assigned when omitted).',
+  'Replace the whole animation with a JSON animation object (same shape get_animation returns). Use this to author a complete animation in one step. Provide name, duration, restHipsY (use get_state restHipsY of the current model) and tracks. Key ids are optional (auto-assigned when omitted). By default the feet are PLANTED ON THE GROUND: after applying, the hips height is re-solved from the leg poses so the lowest foot/toe rests on the floor for the whole loop — do not hand-tune hips heights for walks/runs, just keep legs/feet posed naturally. Pass groundFeet:false only for airborne motion (jumps, hops, sitting, falling).',
   {
     animation: {
       type: 'object',
       description:
         'Animation object: { name: string, duration: number, restHipsY: number, rotTracks?: { boneName: [{ t, euler:[x,y,z] or q:[x,y,z,w], ease? }] }, hipsTrack?: [{ t, p:[x,y,z], ease? }], exprTracks?: { expressionName: [{ t, w: 0..1, ease? }] } }. Prefer euler (canonical degrees, YXZ — same convention as add_rotation_key) over hand-computed quaternions. Expression names come from list_expressions.',
+    },
+    groundFeet: {
+      type: 'boolean',
+      description:
+        'Defaults to true: plant the lowest foot/toe on the ground by re-solving the hips height from the leg poses (fixes floating/flying feet). Set false when the feet must leave the ground: jumps, hops, sitting, falling.',
     },
   },
   ['animation'],
@@ -125,6 +130,11 @@ const addHipsKey = obj(
     },
     ease: { type: 'string', description: "Transition curve toward the next key." },
   },
+);
+
+const groundFeet = obj(
+  "Re-plant the feet of the CURRENT animation: samples the leg poses and rewrites the hips height track so the lowest foot/toe rests on the ground at every sample. Fixes floating/flying feet after manual leg/hips edits or on imported/mocap animations. One undo step. Pins the lowest foot DOWN at all times — do not use it to fix a jump (re-author with set_animation groundFeet:false instead).",
+  {},
 );
 
 const addExpressionKey = obj(
@@ -203,7 +213,7 @@ const getMotionVideoInfo = obj(
 );
 
 const extractMotionFromVideo = obj(
-  'Extract human motion from the loaded motion-reference video as the current animation. Runs in-browser pose tracking (MediaPipe) frame by frame, retargets the tracked person onto the humanoid rig and imports the result as the whole animation (one undo step, starts playing). The video must be loaded first (see get_motion_video_info). Long videos are processed in ≤60s chunks automatically, but keep segments short anyway (start/end) — long spans are slow and the result replaces the timeline. Afterwards review the returned warnings (low coverage, sparse tracks) and refine: set_track_ease smoothing, clear_track for noisy tracks, get_animation/screenshot to inspect. Expect a REFERENCE-quality result: tracking noise, no finger/hand data, hips forward/backward travel is not recoverable from monocular video (vertical bob and lateral sway are).',
+  'Extract human motion from the loaded motion-reference video as the current animation. Runs in-browser pose tracking (MediaPipe) frame by frame, retargets the tracked person onto the humanoid rig and imports the result as the whole animation (one undo step, starts playing). The video must be loaded first (see get_motion_video_info). Long videos are processed in ≤60s chunks automatically, but keep segments short anyway (start/end) — long spans are slow and the result replaces the timeline. Afterwards review the returned warnings (low coverage, sparse tracks) and refine: set_track_ease smoothing, clear_track for noisy tracks, get_animation/screenshot to inspect. Expect a REFERENCE-quality result: tracking noise, finger/hand tracking is approximate (a separate hand model — hands may drop out when small, fast or occluded, showing up as sparse finger tracks), hips forward/backward travel is not recoverable from monocular video (vertical bob and lateral sway are).',
   {
     fps: {
       type: 'number',
@@ -334,6 +344,7 @@ export const TOOL_DEFS: ToolDef[] = [
   named(newAnimation, 'new_animation'),
   named(addRotationKey, 'add_rotation_key'),
   named(addHipsKey, 'add_hips_key'),
+  named(groundFeet, 'ground_feet'),
   named(addExpressionKey, 'add_expression_key'),
   named(clearTrack, 'clear_track'),
   named(moveKey, 'move_key'),

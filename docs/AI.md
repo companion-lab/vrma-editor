@@ -119,10 +119,11 @@ Try it without a client: `npx @modelcontextprotocol/inspector node mcp/server.mj
 | `list_models` | Model library files (`assets/models`) |
 | `list_outfits` | Saved outfit presets for the model |
 | `get_animation` | Full animation JSON (`VrmaData`, incl. `exprTracks`) |
-| `set_animation` | Replace the whole animation with one JSON object |
+| `set_animation` | Replace the whole animation with one JSON object (feet planted on the ground by default — `groundFeet:false` opts out) |
 | `new_animation` | Empty animation, optional name/duration |
 | `add_rotation_key` | Key one bone's rotation (euler degrees or quaternion) |
 | `add_hips_key` | Key hips position (offset from rest) |
+| `ground_feet` | Re-solve the hips height of the current animation so the lowest foot/toe rests on the ground (fixes floating feet) |
 | `add_expression_key` | Key one expression's weight 0..1 (animates the face on the timeline) |
 | `clear_track` | Delete all keys of one track (bone, `'__hips__'`, `'expr:<name>'`) |
 | `move_key` / `set_key_ease` / `set_track_ease` | Retiming & transitions |
@@ -165,11 +166,14 @@ fetched from their CDNs on first use and cached afterwards.
    a few poses and cleans up (easing, deleting noisy tracks, hips tweaks).
    Export it with `export_animation` or keep editing.
 
-Limits of monocular pose tracking: no finger/hand data; hips translation is
-recovered in the screen plane only (vertical bob + lateral sway — forward/back
-travel is not recoverable); very fast motion can smear. Long videos: at most
-60 s per call (`extract_motion_from_video`) — pick the interesting segment with
-`start`/`end`; the Motion tab chunks longer segments automatically.
+Limits of monocular pose tracking: finger/hand tracking is approximate (a
+separate hand model — fingers are sparse/noisy, hands may drop out when small,
+fast or partly occluded, and the result reports them as sparse tracks); hips
+translation is recovered in the screen plane only (vertical bob + lateral sway
+— forward/back travel is not recoverable); very fast motion can smear. Long
+videos: at most 60 s per call (`extract_motion_from_video`) — pick the
+interesting segment with `start`/`end`; the Motion tab chunks longer segments
+automatically.
 
 ## Authoring semantics (for prompting and for `set_animation` JSON)
 
@@ -194,6 +198,15 @@ travel is not recoverable); very fast motion can smear. Long videos: at most
   standing. `add_hips_key` takes an **offset** in meters from the standing
   rest pose (`[0,-0.2,0]` ≈ crouch 20 cm; `[-0.3,0,0]` steps to the model's
   right). X/Z are mirrored automatically for VRM 0.x models.
+- **Grounding**: the correct hips height that keeps a foot planted depends on
+  the leg poses of every frame, so it must not be hand-computed. `set_animation`
+  plants the lowest foot/toe on the ground automatically (`groundFeet` defaults
+  to `true`): after applying, it samples the animation through the rig's FK and
+  rewrites the hips height so that joint rests on the floor — walks/runs/dances
+  stay grounded on any model, and a natural vertical bob (lowest at double
+  support, highest at mid-stance) emerges on its own. Pass `groundFeet:false`
+  for airborne motion (jumps, hops, sitting, falling), and `ground_feet` to
+  re-plant the current animation after manual leg/hips edits or a mocap import.
 - **Timing**: keys are seconds. If a tool gets a `time`, the playhead moves
   there first and the value is snapped to the current snap setting
   (default 1/30 s). Transitions (`ease`: linear/in/out/inout/step/custom)
@@ -235,9 +248,9 @@ travel is not recoverable); very fast motion can smear. Long videos: at most
   thighs swing `[-28,0,0]` (knee forward) ↔ `[18,0,0]` (behind) with the left
   leg half a cycle off; knees flex **+X** — toe-off ~`[30,0,0]`, swing peak
   ~`[55,0,0]`; arms hang down (`rightUpperArm` z `+75`, `leftUpperArm` z
-  `-75`) and swing opposite the legs (`+x` forward); hips bob lowest at
-  double support, highest at mid-stance. Then `set_transport { time: 0,
-  playing: true, loop: true }`.
+  `-75`) and swing opposite the legs (`+x` forward). Omit `hipsTrack` — the
+  default grounding re-solves the hips height every frame so the planted foot
+  stays on the ground. Then `set_transport { time: 0, playing: true, loop: true }`.
 
 ## Architecture
 

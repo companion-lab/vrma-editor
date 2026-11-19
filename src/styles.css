@@ -1328,6 +1328,14 @@ input[type='range']::-moz-range-thumb {
   text-decoration: line-through;
 }
 
+.mesh-row.worn-part {
+  color: var(--accent);
+}
+
+.mesh-row.worn-part .mesh-name {
+  font-weight: 600;
+}
+
 .mesh-name {
   overflow: hidden;
   text-overflow: ellipsis;

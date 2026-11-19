@@ -1,13 +1,17 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CircleDot,
+  ClipboardPaste,
+  Copy,
   Diamond,
   Eraser,
+  Footprints,
   KeyRound,
   Maximize2,
   Pause,
   Play,
   Repeat,
+  Scissors,
   SkipBack,
   Trash2,
   ZoomIn,
@@ -257,6 +261,7 @@ export function Timeline() {
   const selectedKey = useEditor((s) => s.selectedKey);
   const selectedKeys = useEditor((s) => s.selectedKeys);
   const selectedBones = useEditor((s) => s.selectedBones);
+  const hasClipboard = useEditor((s) => s.keyClipboard != null);
   const timelineH = useEditor((s) => s.timelineH);
   const st = useEditor;
 
@@ -782,11 +787,40 @@ export function Timeline() {
           <Diamond size={14} /> Key all
         </button>
         <button
+          className="btn"
+          title="Plant the lowest foot on the ground: re-solve the hips height from the leg poses (fixes floating feet)"
+          onClick={() => st.getState().groundFeet()}
+        >
+          <Footprints size={14} /> Ground
+        </button>
+        <button
           className={`btn icon ${autoKey ? 'active' : ''}`}
           title="Auto-key: record while manipulating"
           onClick={() => st.getState().setAutoKey(!autoKey)}
         >
           <CircleDot size={15} />
+        </button>
+        <button
+          className="btn icon"
+          title="Copy selected keyframes (Ctrl/Cmd+C)"
+          onClick={() => st.getState().copySelectedKeys()}
+        >
+          <Copy size={15} />
+        </button>
+        <button
+          className="btn icon"
+          title="Cut selected keyframes (Ctrl/Cmd+X)"
+          onClick={() => st.getState().cutSelectedKeys()}
+        >
+          <Scissors size={15} />
+        </button>
+        <button
+          className="btn icon"
+          title="Paste keyframes at the playhead (Ctrl/Cmd+V)"
+          disabled={!hasClipboard}
+          onClick={() => st.getState().pasteKeys()}
+        >
+          <ClipboardPaste size={15} />
         </button>
         <button
           className="btn icon danger"

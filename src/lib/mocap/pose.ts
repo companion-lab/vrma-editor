@@ -2,7 +2,7 @@
 // Runs fully in the browser; the WASM runtime and the pose model are fetched
 // from their CDNs on first use and cached by the browser afterwards.
 
-import type { PoseLandmarker } from '@mediapipe/tasks-vision';
+import type { HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 
 /** One tracked landmark (subset of MediaPipe's Landmark we actually use). */
 export interface MocapLandmark {
@@ -20,6 +20,18 @@ export interface PoseFrame {
   world: MocapLandmark[];
   /** Image landmarks: normalized 0..1 per axis (y down). */
   image: MocapLandmark[];
+  /** Detected hands (drives the finger bones). Optional: hands are tracked
+   *  best-effort by a separate model, so a frame may be body-only. */
+  hands?: HandFrame[];
+}
+
+/** One detected hand: 21 landmarks (wrist + 4 joints per finger × 5). */
+export interface HandFrame {
+  /** Image landmarks: normalized 0..1 per axis (y down; z depth vs the wrist). */
+  image: MocapLandmark[];
+  /** World landmarks: meters, origin at the hand's center, same axes as the
+   *  pose world landmarks. */
+  world: MocapLandmark[];
 }
 
 export interface VideoMeta {
@@ -55,6 +67,8 @@ const VISION_VERSION = '1.2.3';
 const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${VISION_VERSION}/wasm`;
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task';
+const HAND_MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task';
 
 /** Longest span a single extraction call may process (keeps tool calls bounded
  *  and the UI responsive; ~15 fps × 60 s ≈ 900 detections). */
@@ -99,12 +113,67 @@ export function getPoseLandmarker(): Promise<PoseLandmarker> {
   return landmarkerPromise;
 }
 
-/** Detect the pose in the CURRENT frame of a live video element (realtime
- *  tracking). Shares the landmarker singleton and the monotonic timestamp
- *  counter with batch extraction: `detectForVideo` timestamps must strictly
- *  increase across every call on the singleton, even across modes, so the
- *  counter continues from wherever extraction left off. Returns null when no
- *  person is detected. */
+let handLandmarkerPromise: Promise<HandLandmarker> | null = null;
+
+/** Lazily create the HandLandmarker singleton (21 finger landmarks per hand,
+ *  up to two hands). Companion to the pose landmarker — finger tracking is
+ *  best-effort: a failed load (e.g. offline first use) keeps body-only
+ *  tracking instead of failing the session. */
+export function getHandLandmarker(): Promise<HandLandmarker> {
+  if (!handLandmarkerPromise) {
+    handLandmarkerPromise = (async () => {
+      const vision = await import('@mediapipe/tasks-vision');
+      const fileset = await vision.FilesetResolver.forVisionTasks(WASM_BASE);
+      const opts = (delegate: 'GPU' | 'CPU') => ({
+        baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate },
+        runningMode: 'VIDEO' as const,
+        numHands: 2,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      try {
+        return await vision.HandLandmarker.createFromOptions(fileset, opts('GPU'));
+      } catch {
+        // GPU delegate can be unavailable (software WebGL, driver issues).
+        return await vision.HandLandmarker.createFromOptions(fileset, opts('CPU'));
+      }
+    })();
+    // Allow a retry after a failed load (e.g. network hiccup).
+    handLandmarkerPromise.catch(() => {
+      handLandmarkerPromise = null;
+    });
+  }
+  return handLandmarkerPromise;
+}
+
+/** Pack a HandLandmarker result into the optional `hands` field of a frame. */
+function readHands(res: ReturnType<HandLandmarker['detectForVideo']>): HandFrame[] | undefined {
+  const ls = res.landmarks;
+  if (!ls?.length) return undefined;
+  const hands: HandFrame[] = [];
+  for (let i = 0; i < ls.length; i++) {
+    const img = ls[i];
+    const world = res.worldLandmarks?.[i];
+    if (!img || img.length < 21 || !world || world.length < 21) continue;
+    hands.push({
+      image: img.slice(0, 21).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility ?? 1 })),
+      world: world.slice(0, 21).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: 1 })),
+    });
+  }
+  return hands.length > 0 ? hands : undefined;
+}
+
+/** Hand model failed to load once — stop retrying it per frame (a dead CDN
+ *  would otherwise be hammered on every live frame). Reset per page load. */
+let handsUnavailable = false;
+
+/** Detect the pose (and, best-effort, the hands) in the CURRENT frame of a
+ *  live video element (realtime tracking). Shares the landmarker singletons
+ *  and the monotonic timestamp counter with batch extraction: `detectForVideo`
+ *  timestamps must strictly increase across every call on a singleton, even
+ *  across modes, so the counter continues from wherever extraction left off.
+ *  Returns null when no person is detected. */
 export async function detectPose(video: HTMLVideoElement, tSec: number): Promise<PoseFrame | null> {
   const landmarker = await getPoseLandmarker();
   nextDetectTs = Math.max(nextDetectTs + 1, Math.round(performance.now()));
@@ -112,10 +181,19 @@ export async function detectPose(video: HTMLVideoElement, tSec: number): Promise
   const img = res.landmarks?.[0];
   const world = res.worldLandmarks?.[0];
   if (!img || !world || img.length < 33 || world.length < 33) return null;
+  let hands: HandFrame[] | undefined;
+  if (!handsUnavailable) {
+    try {
+      hands = readHands((await getHandLandmarker()).detectForVideo(video, nextDetectTs));
+    } catch {
+      handsUnavailable = true; // hand model unavailable (offline first load) — body-only tracking
+    }
+  }
   return {
     t: tSec,
     image: img.slice(0, 33).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility ?? 0 })),
     world: world.slice(0, 33).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility ?? 0 })),
+    hands,
   };
 }
 
@@ -211,10 +289,13 @@ export async function loadVideoMeta(url: string): Promise<VideoMeta> {
 }
 
 /** Extract pose frames from a video: seek + detect at `fps`, skipping frames
- *  where no person is found. Detection is synchronous per frame (WASM), so
- *  the caller should surface progress. */
+ *  where no person is found. Hands/fingers are detected on the same
+ *  (downscaled) canvas, best-effort. Detection is synchronous per frame
+ *  (WASM), so the caller should surface progress. */
 export async function extractPoses(url: string, o: ExtractOptions = {}): Promise<ExtractResult> {
   const landmarker = await getPoseLandmarker();
+  // A failed hand-model load keeps body-only extraction.
+  const handLandmarker = await getHandLandmarker().catch(() => null);
   const video = await loadVideo(url);
   const meta = await readVideoMeta(video);
   if (!meta.duration || !meta.width) {
@@ -257,10 +338,19 @@ export async function extractPoses(url: string, o: ExtractOptions = {}): Promise
     const img = res.landmarks?.[0];
     const world = res.worldLandmarks?.[0];
     if (img && world && img.length >= 33 && world.length >= 33) {
+      let hands: HandFrame[] | undefined;
+      if (handLandmarker) {
+        try {
+          hands = readHands(handLandmarker.detectForVideo(canvas, nextDetectTs));
+        } catch {
+          // skip hands this frame
+        }
+      }
       frames.push({
         t,
         image: img.slice(0, 33).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility ?? 0 })),
         world: world.slice(0, 33).map((l) => ({ x: l.x, y: l.y, z: l.z, visibility: l.visibility ?? 0 })),
+        hands,
       });
     }
     if (o.onProgress && (i % 8 === 0 || i === count - 1)) o.onProgress(i + 1, count);

@@ -53,6 +53,33 @@ export default function App() {
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         st.redo();
+      } else if (mod && e.key.toLowerCase() === 'c') {
+        // Only hijack the browser shortcut when there are keyframes to copy.
+        if (st.selectedKeys.length > 0 || st.selectedKey) {
+          e.preventDefault();
+          st.copySelectedKeys();
+        }
+      } else if (mod && e.key.toLowerCase() === 'x') {
+        if (st.selectedKeys.length > 0 || st.selectedKey) {
+          e.preventDefault();
+          st.cutSelectedKeys();
+        }
+      } else if (mod && e.key.toLowerCase() === 'v') {
+        if (st.keyClipboard) {
+          e.preventDefault();
+          st.pasteKeys();
+        }
+      } else if (mod && e.key.toLowerCase() === 'a') {
+        // Select-all only applies to the timeline's keyframes; let the
+        // browser's native select-all through when there is nothing to grab.
+        const hasKeys =
+          Object.values(st.rotTracks).some((k) => (k?.length ?? 0) > 0) ||
+          st.hipsTrack.length > 0 ||
+          Object.values(st.exprTracks).some((k) => k.length > 0);
+        if (hasKeys) {
+          e.preventDefault();
+          st.selectAllKeys();
+        }
       } else if (e.code === 'Space') {
         e.preventDefault();
         st.togglePlay();

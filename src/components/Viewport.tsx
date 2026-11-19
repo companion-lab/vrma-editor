@@ -12,6 +12,7 @@ import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
 import { applyAllEdits, applyHipsLift, collectMaterials, hipsLiftOffset, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
 import { registerPartAssociations } from '../lib/vrmedit/parts';
+import { updateWornParts, captureTargetRestWorlds, wardrobeGroup } from '../lib/wardrobe/wear';
 import { registerViewport } from '../lib/ai/sceneRef';
 
 export function Viewport() {
@@ -82,6 +83,10 @@ export function Viewport() {
     const vrmRoot = new THREE.Group();
     scene.add(vrmRoot);
 
+    // Worn wardrobe donor scenes live here, next to (not under) vrmRoot so a
+    // model reload doesn't discard them.
+    scene.add(wardrobeGroup());
+
     const overlay = new SkeletonOverlay();
     overlay.setVisible(useEditor.getState().showSkeleton);
     scene.add(overlay.group);
@@ -130,6 +135,9 @@ export function Viewport() {
         // from the normalized rig every frame, so re-apply the lift that keeps
         // the feet on the floor (the same offset is baked in on export).
         applyHipsLift(vrm, hipsLiftOffset(st.modelEdits.boneScale, st.restHipsPos.y, st.restFeetY));
+        // Worn wardrobe parts follow the (now fully posed) skeleton; donor
+        // springbones step here too, before the render updates world matrices.
+        updateWornParts(dt, vrm);
       }
       overlay.update(st);
       orbit.update();
@@ -379,6 +387,8 @@ export function Viewport() {
       st.setModelAssociations({ materialIndexByName, meshNodeIndicesByName });
       // Primitive child → glTF mesh/primitive mapping for the Assets (parts) editor.
       registerPartAssociations(vrm, gltf.parser.associations);
+      // Worn wardrobe donors bind against this rest pose (file space).
+      captureTargetRestWorlds(vrm);
 
       // Re-apply the last used outfit for this model, if any.
       const lastOutfit = st.outfitsFor().last;
