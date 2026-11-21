@@ -5,14 +5,14 @@
 // The donor's own VRM scene is attached under a wardrobeRoot group next to the
 // main model — no cloning, so donor VRM APIs (springbones) keep working. At
 // wear time each worn donor SkinnedMesh gets its inverse bind matrices
-// remapped onto the target skeleton (bake.ts remapSkin — the SAME math the
-// export uses, so the preview always matches the saved file). Every frame each
-// shared humanoid RAW bone's world position+rotation is copied from the target
-// to the donor (skinned meshes bind to raw bones; world-space copying absorbs
-// VRM 0.x root rotations and rest-pose differences). Donor sub-bones outside
-// the humanoid map (VRoid "J_Sec_" hair chains) follow their parents rigidly,
-// and the donor's springbone manager is stepped afterwards so hair keeps its
-// sway.
+// remapped onto the target skeleton (rebindWornMeshes below — the same result
+// the export bake produces, so the preview always matches the saved file).
+// Every frame each shared humanoid RAW bone's world position+rotation is
+// copied from the target to the donor (skinned meshes bind to raw bones;
+// world-space copying absorbs VRM 0.x root rotations and rest-pose
+// differences). Donor sub-bones outside the humanoid map (VRoid "J_Sec_" hair
+// chains) follow their parents rigidly, and the donor's springbone manager is
+// stepped afterwards so hair keeps its sway.
 
 import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
@@ -25,7 +25,7 @@ import {
   type PartCategory,
   type PartId,
 } from '../vrmedit/parts';
-import { conventionRotation, relativeRotation, remapSkin } from './bake';
+import { conventionRotation } from './bake';
 import { AUTO_REPLACE_CATEGORIES, getDonor, type DonorSource } from './sources';
 
 export interface WornRef {
@@ -66,13 +66,118 @@ export function captureTargetRestWorlds(vrm: VRM): void {
   TARGET_REST.set(vrm, map);
 }
 
-// --- attached donor scenes ---
+// --- worn mesh rebinding (inverse bind remap) ---
+
+/**
+ * Remap the inverse bind matrices of the donor's worn SkinnedMeshes onto the
+ * target skeleton. The donor scene keeps its OWN skeleton (so sub-bone hair
+ * chains + springbones keep working), but every humanoid RAW bone's world is
+ * copied from the target each frame — the donor humanoid joints land exactly
+ * on the target's bones. A donor vertex must therefore render as
+ * `C_target · (its donor-file-space position re-fitted onto the target's
+ * joints)`, where the re-fit maps each vertex's world offset from the donor's
+ * joint onto the target's joint, rotated by the facing convention:
+ *
+ *   desired(v) = A_t_runtime_pos + R_rel · (v − A_d_file_pos)
+ *
+ * with A_d/A_t the donor/target humanoid joint of the same bone name and
+ * R_rel the donor→runtime facing rotation (a VRM 0.x file faces the opposite
+ * way of the runtime world, where every loaded model — VRM 0.x after
+ * rotateVRM0, VRM 1.0 natively — faces +Z; hence R_rel is independent of the
+ * target's file version). Per joint j (A = its nearest humanoid ancestor,
+ * itself when humanoid):
+ *
+ *   - j humanoid (j == A):  IBM_new = A_t_runtime⁻¹ · M   (rideWorld below)
+ *   - j sub-bone:           IBM_new = IBM_donor (unchanged — its joint rides
+ *     the compensated local chain set up by rideSubBones, which folds the
+ *     same ride into the chain root's local transform)
+ *
+ * For humanoid joints this matches the export bake (bake.ts remapSkin), so
+ * the preview always matches the saved file.
+ */
+function rebindWornMeshes(donor: DonorSource, wornIds: Set<PartId>, target: VRM): void {
+  const targetRest = TARGET_REST.get(target);
+  if (!targetRest) return; // captureTargetRestWorlds not called yet — try next sync
+
+  // Donor humanoid node → canonical bone name.
+  const nodeToName = new Map<THREE.Object3D, string>();
+  for (const bone of BONE_ORDER) {
+    const node = donor.vrm.humanoid?.getRawBoneNode(bone as never);
+    if (node) nodeToName.set(node, bone);
+  }
+
+  const cRotTarget = conventionRotation((target.meta as { metaVersion?: string } | undefined)?.metaVersion);
+  const relR = conventionRotation((donor.vrm.meta as { metaVersion?: string } | undefined)?.metaVersion);
+
+  for (const mesh of wornSkinnedMeshes(donor, wornIds)) {
+    const skel = mesh.skeleton;
+    if (!skel) continue;
+    // Always remap from the pristine donor IBM (see PRISTINE_IBMS).
+    const originals = pristineInverses(skel);
+    skel.bones.forEach((b, i) => {
+      const ibm = originals[i] ?? new THREE.Matrix4();
+      const name = nodeToName.get(b);
+      if (name) {
+        // The joint IS a humanoid bone: at rest its runtime world is
+        // cRot_target · targetRest, so binding through the ride map makes
+        // the vertex render at M · v and follow the target's bone after.
+        const aRest = targetRest.get(name);
+        const aDonor = donor.restWorlds.get(name);
+        if (!aRest || !aDonor) return;
+        rideWorld(_ibmNew, cRotTarget, aRest, aDonor, relR); // _ibmNew = M
+        _rideA.multiplyMatrices(cRotTarget, aRest);          // A_t_runtime
+        _ibmNew.premultiply(_rideA.invert());                // IBM_new = A_t_runtime⁻¹ · M
+      } else {
+        // Sub-bone: its runtime world rides the compensated local chain
+        // (rideSubBones) — the ride is folded into the chain root's local
+        // transform, so the donor bind must stay untouched.
+        _ibmNew.copy(ibm);
+      }
+      if (skel.boneInverses[i]) skel.boneInverses[i].copy(_ibmNew);
+    });
+  }
+}
+
+/**
+ * The world-space ride `M` anchoring the donor humanoid joint `aDonorFile`
+ * (FILE rest world) onto the target's joint `aRestFile` (FILE rest world —
+ * the runtime world is `cRotTarget · aRestFile`) with the facing rotation
+ * `R_rel` and an optional uniform `scale` in between:
+ *
+ *   M · x = A_t_runtime_pos + scale · R_rel · (x − A_d_file_pos)
+ *
+ * `scale` resizes the transferred subtree about the anchor joint — the head
+ * size ratio for hair chains (target/donor head bone length) so hair from a
+ * smaller-headed donor still covers a bigger head.
+ */
+function rideWorld(
+  out: THREE.Matrix4,
+  cRotTarget: THREE.Matrix4,
+  aRestFile: THREE.Matrix4,
+  aDonorFile: THREE.Matrix4,
+  relR: THREE.Matrix4,
+  scale = 1,
+): void {
+  const aRuntime = _rideA.multiplyMatrices(cRotTarget, aRestFile); // target joint's runtime rest world
+  const aPos = _rideP.setFromMatrixColumn(aRuntime, 3);
+  const aDonorPos = _rideP2.setFromMatrixColumn(aDonorFile, 3);
+  out.makeTranslation(aPos.x, aPos.y, aPos.z);                     // T(A_t_pos)
+  out.multiply(relR);                                              // · R_rel
+  if (Math.abs(scale - 1) > 1e-4) out.multiply(_rideS.makeScale(scale, scale, scale)); // · S
+  out.multiply(_rideRight.makeTranslation(-aDonorPos.x, -aDonorPos.y, -aDonorPos.z)); // · T(−A_d_pos)
+}
 
 interface AttachedDonor {
   donor: DonorSource;
   /** Bone pairs cached per target model (raw humanoid bones, world-synced). */
   target: VRM | null;
   pairs: [THREE.Object3D, THREE.Object3D][];
+  /** Set when the donor's springbone verlet state is stale (attach or re-sync)
+   *  — the next updateWornParts resets it onto the current configuration.
+   *  Donor springbones are weak (VRM 0.x hair often has gravity ≈ 0.1 and no
+   *  stiffness), so a chain teleported by the bone sync would otherwise stay
+   *  stretched out forever instead of falling back into place. */
+  needsSpringReset: boolean;
 }
 
 let wardrobeRoot: THREE.Group | null = null;
@@ -120,9 +225,10 @@ export function syncWorn(
     let a = attached.get(name);
     if (!a) {
       root.add(donor.vrm.scene);
-      a = { donor, target: null, pairs: [] };
+      a = { donor, target: null, pairs: [], needsSpringReset: true };
       attached.set(name, a);
     }
+    a.needsSpringReset = true; // bones may have jumped (attach, undo/redo, re-wear)
     showOnlyWornParts(donor, ids);
     if (vrm) rebindWornMeshes(donor, ids, vrm);
   }
@@ -170,46 +276,31 @@ function wornSkinnedMeshes(donor: DonorSource, wornIds: Set<PartId>): THREE.Skin
   return out;
 }
 
-/**
- * Remap the inverse bind matrices of the donor's worn SkinnedMeshes onto the
- * target skeleton (shared remapSkin math — same as the export bakes). Joints
- * that ARE donor humanoid bones remap onto the target's matching bone; donor
- * sub-bones (J_Sec_…) keep their own bind and follow their synced parents.
- */
-function rebindWornMeshes(donor: DonorSource, wornIds: Set<PartId>, target: VRM): void {
-  const targetRest = TARGET_REST.get(target);
-  if (!targetRest) return; // captureTargetRestWorlds not called yet — try next sync
+/** Pristine inverse binds per donor SkinnedMesh. The remap overwrites
+ *  boneInverses in place, so every re-sync (wearing another part of the same
+ *  donor, undo/redo) must remap from the ORIGINAL donor matrices — feeding the
+ *  already-remapped ones back in would apply the transform twice and garble
+ *  the mesh. */
+const PRISTINE_IBMS = new WeakMap<THREE.Skeleton, THREE.Matrix4[]>();
 
-  // Donor humanoid node → canonical bone name.
-  const nodeToName = new Map<THREE.Object3D, string>();
-  for (const bone of BONE_ORDER) {
-    const node = donor.vrm.humanoid?.getRawBoneNode(bone as never);
-    if (node) nodeToName.set(node, bone);
-  }
-
-  const relR = relativeRotation(
-    (target.meta as { metaVersion?: string } | undefined)?.metaVersion,
-    (donor.vrm.meta as { metaVersion?: string } | undefined)?.metaVersion,
-  );
-
-  for (const mesh of wornSkinnedMeshes(donor, wornIds)) {
-    const skel = mesh.skeleton;
-    if (!skel) continue;
-    const inputs = skel.bones.map((b, i) => {
-      const name = nodeToName.get(b);
-      const rest = name ? donor.restWorlds.get(name) : undefined;
-      if (!name || !rest) {
-        // Sub-bone (or unknown): keep the donor-side joint as-is.
-        return { humanoidName: null, donorRest: new THREE.Matrix4(), donorIBM: skel.boneInverses[i] ?? new THREE.Matrix4() };
-      }
-      return { humanoidName: name, donorRest: rest, donorIBM: skel.boneInverses[i] ?? new THREE.Matrix4() };
-    });
-    const remap = remapSkin(inputs, targetRest, relR);
-    remap.target.forEach((bone, i) => {
-      if (bone != null && skel.boneInverses[i]) skel.boneInverses[i].copy(remap.ibm[i]);
-    });
-  }
+function pristineInverses(skel: THREE.Skeleton): THREE.Matrix4[] {
+  const cached = PRISTINE_IBMS.get(skel);
+  if (cached) return cached;
+  const snapshot = skel.boneInverses.map((m) => new THREE.Matrix4().copy(m));
+  PRISTINE_IBMS.set(skel, snapshot);
+  return snapshot;
 }
+
+// Scratch matrices for the rebind math (single-threaded, sequential use).
+const _ibmNew = new THREE.Matrix4();
+const _ride = new THREE.Matrix4();
+const _rideA = new THREE.Matrix4();
+const _rideC = new THREE.Matrix4();
+const _rideP = new THREE.Vector3();
+const _rideP2 = new THREE.Vector3();
+const _rideB = new THREE.Matrix4();
+const _rideS = new THREE.Matrix4();
+const _rideRight = new THREE.Matrix4();
 
 /**
  * Which parts of the CURRENT model are replaced by worn donor parts: every
@@ -275,6 +366,114 @@ export function updateWornParts(dt: number, target: VRM | null): void {
       d.quaternion.copy(_q);
     }
     a.donor.vrm.scene.updateMatrixWorld(true); // springbones read raw worlds
+    if (a.needsSpringReset) {
+      // Snap the sub-bone chains + verlet state onto the current
+      // (post-sync) configuration.
+      a.needsSpringReset = false;
+      rideSubBones(a, target);
+      a.donor.vrm.springBoneManager?.setInitState();
+      a.donor.vrm.springBoneManager?.reset();
+    }
     a.donor.vrm.springBoneManager?.update(dt);
   }
+}
+
+/**
+ * Re-anchor the local transform of every donor sub-bone that hangs directly
+ * off a humanoid bone (chain roots — hair tufts, skirt spring roots…) so the
+ * chain rides the world-space ride map `M` (rideWorld): its runtime world
+ * becomes `M · RestJ_d` instead of the naive parent-follow
+ * `A_t_runtime · RestA_d⁻¹ · RestJ_d`.
+ *
+ * The ride also SCALES the chain by the anchor bone's length ratio
+ * (target/donor) — hair authored for a smaller head still covers a bigger
+ * head, skirt chains follow the hips. Without it, cross-model hair renders as
+ * a too-small cap floating on the target's head.
+ *
+ * The humanoid bones are world-synced onto the target, but a sub-bone chain
+ * below them keeps its DONOR-local offsets — which are expressed in the
+ * donor's file frame, facing the opposite way for VRM 0.x donors. Without
+ * this compensation a VRM 0.x donor's hair/skirt springs render on the wrong
+ * side of the target's head/body (and the naive frame-conjugated variant
+ * collapses the chain, because the donor's joint frames are not
+ * world-aligned). The compensated root flips and resizes the whole subtree
+ * while keeping the chain's internal shape (deeper bones are untouched — they
+ * ride the compensated root rigidly), and the donor binds stay valid
+ * (sub-bone IBMs are left unchanged — see rebindWornMeshes). Computed from
+ * the pristine rest captures, so it is idempotent across re-attachments.
+ * `setInitState` afterwards re-anchors the spring stiffness to the
+ * compensated rest.
+ */
+function rideSubBones(a: AttachedDonor, target: VRM): void {
+  const vrm = a.donor.vrm;
+  const targetRest = TARGET_REST.get(target);
+  if (!targetRest) return;
+  const cRotTarget = conventionRotation((target.meta as { metaVersion?: string } | undefined)?.metaVersion);
+  const relR = conventionRotation((vrm.meta as { metaVersion?: string } | undefined)?.metaVersion);
+  // Donor humanoid node → canonical bone name (TARGET_REST is keyed by it).
+  const nodeToName = new Map<THREE.Object3D, string>();
+  for (const bone of BONE_ORDER) {
+    const node = vrm.humanoid?.getRawBoneNode(bone as never);
+    if (node) nodeToName.set(node, bone);
+  }
+  const humanoidNodes = new Set<THREE.Object3D>(nodeToName.keys());
+  vrm.scene.traverse((o) => {
+    if (!(o as THREE.Bone).isBone || humanoidNodes.has(o)) return;
+    // Walk up to the nearest bone ancestor: compensate only when it is the
+    // humanoid bone itself (chain roots). Deeper bones ride their
+    // compensated parent.
+    let p: THREE.Object3D | null = o.parent;
+    while (p && !(p as THREE.Bone).isBone && !humanoidNodes.has(p)) p = p.parent;
+    if (!p || !humanoidNodes.has(p)) return;
+    const ancestorName = nodeToName.get(p);
+    const restJ = a.donor.restNodes.get(o);
+    const restA_donor = a.donor.restNodes.get(p);
+    const restA_target = ancestorName ? targetRest.get(ancestorName) : undefined;
+    if (!ancestorName || !restJ || !restA_donor || !restA_target) return;
+
+    // Anchor scale = the anchor bone's segment length ratio (target/donor):
+    // the distance from the anchor joint to its humanoid parent joint
+    // approximates the part size the chain hangs off (head size for hair,
+    // hip size for skirt chains).
+    const parentName = humanoidParentOf(p, nodeToName);
+    let scale = 1;
+    if (parentName) {
+      const parentTargetNode = target.humanoid?.getRawBoneNode(parentName as never);
+      const parentDonorRest = a.donor.restNodes.get(p);
+      if (parentTargetNode && parentDonorRest) {
+        parentTargetNode.updateWorldMatrix(true, false);
+        const aPos = new THREE.Vector3().setFromMatrixColumn(p.matrixWorld, 3);
+        const pT = new THREE.Vector3().setFromMatrixColumn(parentTargetNode.matrixWorld, 3);
+        const aD = new THREE.Vector3().setFromMatrixColumn(restA_donor, 3);
+        const pD = new THREE.Vector3().setFromMatrixColumn(parentDonorRest, 3);
+        const donorLen = aD.distanceTo(pD);
+        const targetLen = aPos.distanceTo(pT);
+        if (donorLen > 1e-6) scale = targetLen / donorLen;
+      }
+    }
+
+    // local_new = A_t_runtime⁻¹ · M_s · RestJ_d — from the pristine captures,
+    // so repeated attachments don't accumulate transforms.
+    rideWorld(_ride, cRotTarget, restA_target, restA_donor, relR, scale);
+    _ride.premultiply(_rideA.copy(A_tRuntimeWorld(cRotTarget, restA_target)).invert());
+    _ride.multiply(restJ);
+    _ride.decompose(o.position, o.quaternion, o.scale);
+  });
+}
+
+/** The nearest humanoid parent bone name above `node` (null when none). */
+function humanoidParentOf(
+  node: THREE.Object3D,
+  nodeToName: Map<THREE.Object3D, string>,
+): string | null {
+  for (let cur: THREE.Object3D | null | undefined = node.parent; cur; cur = cur.parent) {
+    const name = nodeToName.get(cur);
+    if (name) return name;
+  }
+  return null;
+}
+
+/** The target humanoid joint's runtime rest world: cRot_target · file rest. */
+function A_tRuntimeWorld(cRotTarget: THREE.Matrix4, restFile: THREE.Matrix4): THREE.Matrix4 {
+  return _rideC.multiplyMatrices(cRotTarget, restFile);
 }

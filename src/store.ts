@@ -75,6 +75,12 @@ export interface ModelEdits {
   meta: Record<string, string>;
   /** Humanoid bone name → uniform scale factor. */
   boneScale: Record<string, number>;
+  /** VRoid-style body-shape parameters (height, arm length, hip width…) →
+   *  factor. Applied as a second pass over boneScale; see proportions.ts. */
+  bodyShape: Record<string, number>;
+  /** Face parameters (eyeSize / eyeHeight / eyeSpacing) → factor or offset;
+   *  see appearance.ts and live.ts applyFaceShape. */
+  face: Record<string, number>;
 }
 
 const EMPTY_EDITS: ModelEdits = {
@@ -84,6 +90,8 @@ const EMPTY_EDITS: ModelEdits = {
   expressions: {},
   meta: {},
   boneScale: {},
+  bodyShape: {},
+  face: {},
 };
 
 export function countModelEdits(edits: ModelEdits): number {
@@ -93,7 +101,9 @@ export function countModelEdits(edits: ModelEdits): number {
     edits.hiddenParts.length +
     Object.keys(edits.expressions).length +
     Object.keys(edits.meta).length +
-    Object.keys(edits.boneScale).length
+    Object.keys(edits.boneScale).length +
+    Object.keys(edits.bodyShape).length +
+    Object.keys(edits.face).length
   );
 }
 
@@ -211,7 +221,17 @@ import { BONE_ORDER, BONE_ORDER_INDEX } from './lib/humanoid';
 import { applyExpressionWeight, syncModelEdits } from './lib/vrmedit/live';
 import { applyAssetVisibilityAll, type PartCategory, type PartId } from './lib/vrmedit/parts';
 import { computeReplaced, detachAllWorn, syncWorn, type WornRef } from './lib/wardrobe/wear';
+import { AUTO_REPLACE_CATEGORIES } from './lib/wardrobe/sources';
 import { bakeGroundFeet } from './lib/ground';
+
+/** syncWorn + a status hint when a worn donor isn't loaded this session (its
+ *  parts are silently absent until the donor file is available again). */
+function syncWornHinted(vrm: VRM | null, worn: WornRef[]): void {
+  const { missing } = syncWorn(vrm, worn);
+  if (missing.length) {
+    useEditor.getState().setStatus('info', `Wardrobe donors not loaded this session: ${missing.join(', ')}`);
+  }
+}
 
 export interface Snapshot {
   animName: string;
@@ -386,6 +406,12 @@ interface EditorState {
   resetAllExpressionEdits: () => void;
   setMetaEdit: (field: string, value: string) => void;
   setBoneScale: (bone: string, factor: number) => void;
+  /** VRoid-style body-shape parameter → factor (see proportions.ts). */
+  setBodyShape: (param: string, factor: number) => void;
+  resetBodyShape: () => void;
+  /** Face parameter (eyeSize / eyeHeight / eyeSpacing) → factor or offset. */
+  setFaceShape: (param: string, value: number) => void;
+  resetFaceShape: () => void;
   setStatus: (kind: Status['kind'], msg: string) => void;
   bumpPose: () => void;
 
@@ -423,11 +449,20 @@ interface EditorState {
   /** Copy the selected keyframes (the multi-selection, or the primary one)
    *  onto the internal clipboard. Returns true when anything was copied. */
   copySelectedKeys: () => boolean;
-  /** Paste the clipboard's keyframe block anchored at the snapped playhead
-   *  (pulled back so the block fits the clip). Keys landing on an existing
-   *  key's time overwrite it (the upsert rule). One undo step; selects the
-   *  pasted keys. */
-  pasteKeys: () => void;
+  /** Internal core of the copy actions: resolve refs to keys, group them by
+   *  track, block-anchor to the earliest key and fill the clipboard. */
+  copyKeyRefs: (refs: { track: TrackId; id: number }[]) => boolean;
+  /** Copy every keyframe of one track (context menu — copy without touching
+   *  the selection). Returns true when anything was copied. */
+  copyTrackKeys: (track: TrackId) => boolean;
+  /** Select every keyframe of one track (context menu — also selects the
+   *  track's bone so the row highlights). */
+  selectTrackKeys: (track: TrackId) => void;
+  /** Paste the clipboard's keyframe block anchored at `atTime` (or the
+   *  snapped playhead when omitted; pulled back so the block fits the clip).
+   *  Keys landing on an existing key's time overwrite it (the upsert rule).
+   *  One undo step; selects the pasted keys. */
+  pasteKeys: (atTime?: number) => void;
   /** Copy the selection, then delete it — one undo step (via the delete). */
   cutSelectedKeys: () => void;
   /** Select every keyframe of every track (rotations, hips, expressions). */
@@ -515,8 +550,10 @@ export const useEditor = create<EditorState>()((set, get) => ({
   vrm: null,
   restHipsPos: new Vector3(),
   restFeetY: 0,
-  modelUrl: loadLastModel()?.url ?? '/models/demo.glb',
-  modelName: loadLastModel()?.name ?? 'demo.glb',
+  // First-run default: the VRoid sample with a real body (base layers baked
+  // in), so taking costume pieces off never leaves a bare mannequin.
+  modelUrl: loadLastModel()?.url ?? '/models/AvatarSample_B.vrm',
+  modelName: loadLastModel()?.name ?? 'AvatarSample_B.vrm',
   modelLoading: true,
 
   modelLibrary: [],
@@ -785,7 +822,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       },
       worn,
     }));
-    syncWorn(vrm, worn);
+    syncWornHinted(vrm, worn);
     if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
     const outfits = { ...get().outfits, [modelName]: { ...get().outfits[modelName]!, last: name } };
     saveOutfits(outfits);
@@ -818,21 +855,35 @@ export const useEditor = create<EditorState>()((set, get) => ({
     const { vrm, worn: prev, modelEdits } = get();
     if (prev.some((w) => w.donor === donor && w.id === id)) return;
     get().pushHistory();
-    const worn = [...prev, { donor, id, category, replacedMeshes: [], replacedParts: [] }];
+
+    // One costume slot per category (VRoid behaviour): wearing a part replaces
+    // the worn parts of the same category from OTHER donors. Same-donor pieces
+    // of one category stack — a hairstyle split into a cap and a back mesh is
+    // meant to be worn together. The ambiguous "other" category never
+    // auto-replaces (accessories stack freely).
+    const replaces = (AUTO_REPLACE_CATEGORIES as string[]).includes(category);
+    const removed = replaces ? prev.filter((w) => w.category === category && w.donor !== donor) : [];
+    const removedMeshes = new Set(removed.flatMap((w) => w.replacedMeshes));
+    const removedParts = new Set(removed.flatMap((w) => w.replacedParts));
+    const worn = [...prev.filter((w) => !removed.includes(w)), { donor, id, category, replacedMeshes: [], replacedParts: [] }];
     const entry = worn[worn.length - 1];
+    // Hidden originals the removed entries had taken over go back into the
+    // pool, so the new wear's own replace set records them exactly (unwear
+    // then restores everything it should).
+    const hiddenMeshes = modelEdits.hiddenMeshes.filter((n) => !removedMeshes.has(n));
+    const hiddenParts = modelEdits.hiddenParts.filter((p) => !removedParts.has(p));
     const replaced = computeReplaced(vrm, worn);
-    // Record only ids this wear actually added (idempotent vs manual hides).
-    entry.replacedMeshes = replaced.replacedMeshes.filter((n) => !modelEdits.hiddenMeshes.includes(n));
-    entry.replacedParts = replaced.replacedParts.filter((p) => !modelEdits.hiddenParts.includes(p));
+    entry.replacedMeshes = replaced.replacedMeshes.filter((n) => !hiddenMeshes.includes(n));
+    entry.replacedParts = replaced.replacedParts.filter((p) => !hiddenParts.includes(p));
     set((s) => ({
       worn,
       modelEdits: {
         ...s.modelEdits,
-        hiddenMeshes: [...s.modelEdits.hiddenMeshes, ...entry.replacedMeshes],
-        hiddenParts: [...s.modelEdits.hiddenParts, ...entry.replacedParts],
+        hiddenMeshes: [...hiddenMeshes, ...entry.replacedMeshes],
+        hiddenParts: [...hiddenParts, ...entry.replacedParts],
       },
     }));
-    syncWorn(vrm, worn);
+    syncWornHinted(vrm, worn);
     if (vrm) applyAssetVisibilityAll(vrm, get().modelEdits.hiddenMeshes, get().modelEdits.hiddenParts);
   },
 
@@ -853,7 +904,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       worn: remaining,
       modelEdits: { ...s.modelEdits, hiddenMeshes, hiddenParts },
     }));
-    syncWorn(vrm, remaining);
+    syncWornHinted(vrm, remaining);
     if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
   },
 
@@ -870,7 +921,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       worn: [],
       modelEdits: { ...s.modelEdits, hiddenMeshes, hiddenParts },
     }));
-    syncWorn(vrm, []);
+    syncWornHinted(vrm, []);
     if (vrm) applyAssetVisibilityAll(vrm, hiddenMeshes, hiddenParts);
   },
 
@@ -914,6 +965,37 @@ export const useEditor = create<EditorState>()((set, get) => ({
       else boneScale[bone] = factor;
       return { modelEdits: { ...s.modelEdits, boneScale } };
     });
+  },
+
+  setBodyShape: (param, factor) => {
+    // One drag = one undo step, same convention as setBoneScale.
+    get().pushHistory('bodyShape');
+    set((s) => {
+      const bodyShape = { ...s.modelEdits.bodyShape };
+      if (Math.abs(factor - 1) < 0.005) delete bodyShape[param];
+      else bodyShape[param] = factor;
+      return { modelEdits: { ...s.modelEdits, bodyShape } };
+    });
+  },
+
+  resetBodyShape: () => {
+    get().pushHistory('bodyShape');
+    set((s) => ({ modelEdits: { ...s.modelEdits, bodyShape: {} } }));
+  },
+
+  setFaceShape: (param, value) => {
+    get().pushHistory('faceShape');
+    set((s) => {
+      const face = { ...s.modelEdits.face };
+      if (Math.abs(value) < 0.005 || (param === 'eyeSize' && Math.abs(value - 1) < 0.005)) delete face[param];
+      else face[param] = value;
+      return { modelEdits: { ...s.modelEdits, face } };
+    });
+  },
+
+  resetFaceShape: () => {
+    get().pushHistory('faceShape');
+    set((s) => ({ modelEdits: { ...s.modelEdits, face: {} } }));
   },
 
   setStatus: (kind, msg) => set({ status: { kind, msg, seq: ++statusSeq } }),
@@ -1059,8 +1141,47 @@ export const useEditor = create<EditorState>()((set, get) => ({
       s.setStatus('info', 'Nothing to copy — select keyframes on the timeline first');
       return false;
     }
-    // Resolve each ref to its key object, grouped by track (the same inline
-    // lookup the other bulk actions use).
+    return get().copyKeyRefs(refs);
+  },
+
+  // Context menu: copy every key of one track without touching the selection.
+  copyTrackKeys: (track) => {
+    const s = get();
+    const keys =
+      track === HIPS_TRACK_ID
+        ? s.hipsTrack
+        : isExprTrack(track)
+          ? (s.exprTracks[exprNameOf(track)] ?? [])
+          : (s.rotTracks[track] ?? []);
+    if (keys.length === 0) {
+      s.setStatus('info', 'That track has no keyframes to copy');
+      return false;
+    }
+    return get().copyKeyRefs(keys.map((k) => ({ track, id: k.id })));
+  },
+
+  // Context menu: select every key of one track; bone rows also select the
+  // bone itself so the row highlights like a label click.
+  selectTrackKeys: (track) => {
+    const s = get();
+    const keys =
+      track === HIPS_TRACK_ID
+        ? s.hipsTrack
+        : isExprTrack(track)
+          ? (s.exprTracks[exprNameOf(track)] ?? [])
+          : (s.rotTracks[track] ?? []);
+    if (keys.length === 0) {
+      s.setStatus('info', 'That track has no keyframes to select');
+      return;
+    }
+    const refs = keys.map((k) => ({ track, id: k.id }));
+    set({ selectedKeys: refs, selectedKey: refs[0] });
+    if (!isExprTrack(track) && track !== HIPS_TRACK_ID) get().selectBone(track);
+  },
+
+  // Shared copy core: resolve each ref to its key object, grouped by track.
+  copyKeyRefs: (refs) => {
+    const s = get();
     let t0 = Infinity;
     const picked = new Map<TrackId, (RotKey | PosKey | ExprKey)[]>();
     const pick = (track: TrackId, keys: (RotKey | PosKey | ExprKey)[] | undefined) => {
@@ -1108,7 +1229,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   // pulled back so the block fits inside the clip (same block-clamp rule as
   // moveKeySnapshot). One untagged history push — a paste is exactly one undo
   // step — then a single set() that upserts every pasted key and selects them.
-  pasteKeys: () => {
+  pasteKeys: (atTime) => {
     const s = get();
     const clip = s.keyClipboard;
     if (!clip || clip.length === 0) {
@@ -1117,7 +1238,10 @@ export const useEditor = create<EditorState>()((set, get) => ({
     }
     let span = 0;
     for (const t of clip) for (const k of t.keys) span = Math.max(span, k.t);
-    const anchor = Math.max(0, Math.min(s.snapTime(s.time), s.duration - span));
+    const anchor = Math.max(
+      0,
+      Math.min(s.snapTime(atTime ?? s.time), s.duration - span),
+    );
     s.pushHistory();
     const pastedRefs: { track: TrackId; id: number }[] = [];
     set((st) => {
@@ -1818,7 +1942,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   groundFeet: () => {
     const { vrm, restHipsPos, restFeetY, modelEdits } = get();
     if (!vrm) return null;
-    const res = bakeGroundFeet(vrm, get().getAnimData(), restHipsPos, restFeetY, modelEdits.boneScale);
+    const res = bakeGroundFeet(vrm, get().getAnimData(), restHipsPos, restFeetY, modelEdits.boneScale, modelEdits.bodyShape);
     if (res.sampled === 0) return null;
     get().pushHistory();
     set({ hipsTrack: res.hipsTrack });

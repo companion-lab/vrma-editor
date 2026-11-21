@@ -1107,6 +1107,62 @@ input[type='range']::-moz-range-thumb {
   padding: 8px;
 }
 
+/* ---------- timeline context menu ---------- */
+/* Same visual language as the toolbar dropdown, but fixed to the viewport
+   since it opens from a scrolling timeline. */
+.tl-menu {
+  position: fixed;
+  z-index: 90;
+  min-width: 190px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px var(--shadow-color);
+}
+
+.tl-menu-item {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.tl-menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tl-menu-item.danger {
+  color: var(--danger);
+}
+
+.tl-menu-item.danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.tl-menu-item:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.tl-menu-item:disabled:hover {
+  background: none;
+}
+
+.tl-menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 2px;
+}
+
 /* ---------- model panel ---------- */
 .model-body {
   padding: 0 8px 12px;
@@ -1449,6 +1505,18 @@ input[type='range']::-moz-range-thumb {
 
 .outfit-chip.active {
   border-color: var(--accent);
+}
+
+/* Non-interactive wardrobe donor chips (style source indicators) */
+.outfit-chip.static {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text);
+  gap: 4px;
+}
+
+.outfit-chip.donor-error {
+  color: var(--danger);
 }
 
 .outfit-apply {

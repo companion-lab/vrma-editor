@@ -6,15 +6,20 @@
 // donor bones collapse onto their nearest humanoid ancestor), and the inverse
 // bind matrix is recomputed as
 //
-//   IBM_new = W_targetRest⁻¹ · R_rel · W_donorRest · IBM_donor
+//   IBM_new = RestA_t⁻¹ · T(RestA_t_pos) · relR · T(−RestA_d_pos) · RestJ_d · IBM_d
+//           = R_t_file⁻¹ · relR · T(−RestA_d_pos) · RestJ_d · IBM_d
 //
-// where the W's are the FILE rest-pose world matrices (VRM rest = T-pose) and
-// R_rel rotates between the two files' facing conventions (VRM 0.x files face
-// the opposite way of VRM 1.0). At rest this reproduces exactly the pose the
-// user saw in the preview; when the target animates, the outfit follows the
-// target's joints with the donor's bind offsets. Proportion (bone-scale) edits
-// are applied AFTER baking, so the outfit rides the scaled skeleton the same
-// way it rides the live one.
+// where RestA_t is the target humanoid node's FILE rest world, RestA_d/RestJ_d
+// the donor's FILE rest worlds of the joint's humanoid ancestor A and of the
+// joint J itself, and relR rotates between the two files' facing conventions
+// (VRM 0.x files face the opposite way of VRM 1.0). The T·relR·T is the
+// joint-anchored facing rotation: it maps each vertex's world offset from the
+// donor's joint onto the target's joint, so proportion differences between
+// donor and target re-fit the cloth instead of displacing it. At rest this
+// reproduces exactly the pose the user saw in the preview; when the target
+// animates, the outfit follows the target's joints with the donor's bind
+// offsets. Proportion (bone-scale) edits are applied AFTER baking, so the
+// outfit rides the scaled skeleton the same way it rides the live one.
 //
 // Donor springbones are NOT carried over: sub-bone chains collapse onto their
 // humanoid ancestor, so exported donor hair hangs rigid (the live preview
@@ -34,6 +39,11 @@ export interface SkinJointInput {
   humanoidName: string | null;
   /** Donor-side FILE rest-pose world matrix of the joint. */
   donorRest: Matrix4;
+  /** Donor-side FILE rest-pose world matrix of the joint's nearest humanoid
+   *  ancestor (itself when humanoid). */
+  donorAncestorRest: Matrix4;
+  /** Target-side FILE rest-pose world matrix of the same humanoid node. */
+  targetAncestorRest: Matrix4;
   /** The donor skin's original inverse bind matrix for this joint. */
   donorIBM: Matrix4;
 }
@@ -46,22 +56,38 @@ export interface SkinRemapResult {
 }
 
 /**
- * Compute the remapped inverse binds for a donor skin. IBM_new =
- * W_targetRest⁻¹ · R_rel · W_donorRest · IBM_donor — see the file comment.
+ * Compute the remapped inverse binds for a donor skin.
+ *
+ *   IBM_new = RestA_t⁻¹ · T(RestA_t_pos) · relR · T(−RestA_d_pos) · RestJ_d · IBM_d
+ *           = R_t_file⁻¹ · relR · T(−RestA_d_pos) · RestJ_d · IBM_d
+ *
+ * (RestA_t = the target humanoid node's FILE rest world; RestA_d/RestJ_d =
+ * the donor's FILE rest worlds of the joint's humanoid ancestor A and of the
+ * joint J itself; relR rotates between the two files' facing conventions.)
+ *
+ * The T·relR·T is the joint-anchored facing rotation: it maps each vertex's
+ * world offset from the donor's joint onto the target's joint, so proportion
+ * differences between donor and target re-fit the cloth instead of
+ * displacing it. At rest this matches the live preview (wear.ts
+ * rebindWornMeshes); when the target animates, the outfit follows the
+ * target's joints with the donor's bind offsets.
  */
 export function remapSkin(
   joints: SkinJointInput[],
-  targetRestByName: Map<string, Matrix4>,
   relR: Matrix4,
 ): SkinRemapResult {
   const target: (string | null)[] = [];
   const ibm: Matrix4[] = [];
   const m = new Matrix4();
   for (const j of joints) {
-    const tRest = j.humanoidName ? targetRestByName.get(j.humanoidName) : undefined;
-    if (j.humanoidName && tRest) {
-      // ibm = targetRest⁻¹ · relR · donorRest · donorIBM
-      m.copy(tRest).invert().multiply(relR).multiply(j.donorRest).multiply(j.donorIBM);
+    if (j.humanoidName) {
+      const aPos = _v3A.setFromMatrixColumn(j.targetAncestorRest, 3);
+      const aDonorPos = _v3B.setFromMatrixColumn(j.donorAncestorRest, 3);
+      m.copy(j.targetAncestorRest).invert();
+      m.multiply(_m1.makeTranslation(aPos.x, aPos.y, aPos.z));
+      m.multiply(relR);
+      m.multiply(_m2.makeTranslation(-aDonorPos.x, -aDonorPos.y, -aDonorPos.z));
+      m.multiply(j.donorRest).multiply(j.donorIBM);
       ibm.push(new Matrix4().copy(m));
       target.push(j.humanoidName);
     } else {
@@ -71,6 +97,12 @@ export function remapSkin(
   }
   return { target, ibm };
 }
+
+// Scratch matrices — remapSkin is single-threaded and sequential.
+const _v3A = new Vector3();
+const _v3B = new Vector3();
+const _m1 = new Matrix4();
+const _m2 = new Matrix4();
 
 /** Facing convention rotation a loaded VRM applies at runtime (VRM 0.x faces
  *  the opposite way of VRM 1.0). Also the matrix between two files' spaces. */
@@ -460,10 +492,10 @@ function mergeDonor(
   (djson.nodes ?? []).forEach((n: any, i: number) => (n.children ?? []).forEach((c: number) => parentOf.set(c, i)));
   const donorNodeBone = new Map<number, string>();
   for (const [bone, node] of donorBones) donorNodeBone.set(node, bone);
-  const ancestorBone = (node: number): string | null => {
+  const ancestorOf = (node: number): { bone: string; node: number } | null => {
     for (let cur: number | undefined = node; cur != null; cur = parentOf.get(cur)) {
       const bone = donorNodeBone.get(cur);
-      if (bone) return bone;
+      if (bone) return { bone, node: cur };
     }
     return null;
   };
@@ -540,19 +572,22 @@ function mergeDonor(
       const joints: number[] = dskin.joints ?? [];
       const ibmSrc = dskin.inverseBindMatrices != null ? readMat4Accessor(djson, dbin!, dskin.inverseBindMatrices) : null;
 
-      const jointInputs = joints.map((jn: number, i: number) => ({
-        humanoidName: ancestorBone(jn),
-        donorRest: donorWorlds.get(jn) ?? new Matrix4(),
-        // IBM rows are indexed by JOINT index, not by the joint's node index.
-        donorIBM: ibmSrc
-          ? new Matrix4().fromArray(ibmSrc, i * 16)
-          : new Matrix4().copy(donorWorlds.get(jn) ?? new Matrix4()).invert(),
-      }));
-      const remap = remapSkin(
-        jointInputs,
-        new Map([...targetBones].map(([bone, node]) => [bone, targetWorlds.get(node) ?? new Matrix4()])),
-        relR,
-      );
+      const jointInputs = joints.map((jn: number, i: number) => {
+        const ancestor = ancestorOf(jn);
+        const ancestorBoneName = ancestor?.bone ?? null;
+        const targetNode = ancestorBoneName != null ? targetBones.get(ancestorBoneName) : undefined;
+        return {
+          humanoidName: ancestorBoneName,
+          donorRest: donorWorlds.get(jn) ?? new Matrix4(),
+          donorAncestorRest: ancestor ? (donorWorlds.get(ancestor.node) ?? new Matrix4()) : new Matrix4(),
+          targetAncestorRest: targetNode != null ? (targetWorlds.get(targetNode) ?? new Matrix4()) : new Matrix4(),
+          // IBM rows are indexed by JOINT index, not by the joint's node index.
+          donorIBM: ibmSrc
+            ? new Matrix4().fromArray(ibmSrc, i * 16)
+            : new Matrix4().copy(donorWorlds.get(jn) ?? new Matrix4()).invert(),
+        };
+      });
+      const remap = remapSkin(jointInputs, relR);
 
       const mappedJoints = remap.target.map((bone) => (bone != null ? targetBones.get(bone) : undefined));
       if (mappedJoints.every((n) => n != null)) {

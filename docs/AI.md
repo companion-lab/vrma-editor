@@ -107,7 +107,7 @@ Try it without a client: `npx @modelcontextprotocol/inspector node mcp/server.mj
 
 ## Tool reference
 
-35 tools. Everything below errors helpfully when no model is loaded.
+38 tools. Everything below errors helpfully when no model is loaded.
 
 | Tool | What it does |
 |---|---|
@@ -118,6 +118,8 @@ Try it without a client: `npx @modelcontextprotocol/inspector node mcp/server.mj
 | `list_expressions` | Expression names + current/baked/edited weights + key counts |
 | `list_models` | Model library files (`assets/models`) |
 | `list_outfits` | Saved outfit presets for the model |
+| `list_wardrobe` | Wardrobe style donors (other VRM files in `assets/wardrobe`) with their wearable parts `{id, label, category}` + what is currently worn |
+| `wear_item` / `unwear_item` | Wear / take off a donor part (hair, top, pants, shoes…) — wearing auto-hides the model's own same-category pieces; the look bakes into `save_model` |
 | `get_animation` | Full animation JSON (`VrmaData`, incl. `exprTracks`) |
 | `set_animation` | Replace the whole animation with one JSON object (feet planted on the ground by default — `groundFeet:false` opts out) |
 | `new_animation` | Empty animation, optional name/duration |

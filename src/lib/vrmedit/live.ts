@@ -7,11 +7,18 @@ import type { MaterialEdit, ModelEdits } from '../../store';
 import { BONE_ORDER } from '../humanoid';
 import { applyAssetVisibilityAll } from './parts';
 import {
+  BODY_SHAPE_LENGTH,
+  BODY_SHAPE_GIRTH,
+  BODY_SHAPE_UNIFORM,
   COMPENSATE_CHILD_SCALE,
   EDITABLE_BONES,
   LENGTH_AXIS_CHILD,
   THICKEN_BONES,
+  bodyShapeLengthFactor,
+  legLengthFactor,
+  type BodyShapeParam,
 } from './proportions';
+import { EYE_ADJ_BONES, materialGroup } from './appearance';
 import {
   DoubleSide,
   FrontSide,
@@ -210,6 +217,56 @@ export function collectMeshNames(vrm: VRM): string[] {
 // which combines both lists so merged meshes and their primitives never fight
 // over .visible.)
 
+/**
+ * Point MToon outline material groups at their fill material.
+ *
+ * VRoid-style meshes ship the outline as a SECOND material group covering the
+ * whole primitive. The outline shader ignores the main texture's alpha, so
+ * garment regions the fill pass discards (hidden layers whose texels are
+ * fully transparent — e.g. AvatarSample_B's coat-skirt lining) would still
+ * render solid through the outline. Rendering those groups with the fill
+ * material makes both passes discard identically; visible parts keep their
+ * outlines (the outline shell sits ~2mm outside the surface and samples the
+ * same texels, so the difference is imperceptible).
+ */
+export function collapseOutlineMaterialGroups(vrm: VRM): void {
+  vrm.scene.traverse((o) => {
+    const mesh = o as TMesh;
+    if (!mesh.isMesh || !Array.isArray(mesh.material)) return;
+    const mats = mesh.material;
+    const fill = mats.find((m) => m && !(m as MToonLike).isOutline);
+    if (!fill) return;
+    if (!mats.some((m) => m && (m as MToonLike).isOutline)) return;
+    mesh.material = mats.map((m) => ((m as MToonLike).isOutline ? fill : m));
+  });
+}
+
+interface MToonLike {
+  isOutline?: boolean;
+  alphaTest?: number;
+  uniforms?: { alphaTest?: { value: number } };
+}
+
+/**
+ * Keep MToon's `alphaTest` shader uniform in sync with the material property.
+ * Some parses initialize the uniform to 0 even when material.alphaTest is set,
+ * and the MToon shader discards against the UNIFORM — garments with
+ * alpha-hidden layers (transparent texels, e.g. AvatarSample_B's coat-skirt
+ * lining) would then render solid. Syncing here is idempotent and cheap.
+ */
+export function syncMToonUniforms(vrm: VRM): void {
+  vrm.scene.traverse((o) => {
+    const mesh = o as TMesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of mats) {
+      const mt = m as MToonLike;
+      const uniform = mt.uniforms?.alphaTest;
+      if (uniform && typeof mt.alphaTest === 'number') uniform.value = mt.alphaTest;
+    }
+  });
+}
+
 // --- Expressions ---
 
 export function expressionNames(vrm: VRM): string[] {
@@ -279,8 +336,18 @@ function rawBoneNode(vrm: VRM, bone: string): Object3D | null {
  * upper arm and ×1.3 forearm give a ×1.3 forearm, never ×1.56). Torso & limb
  * factors thicken their part (girth only, length axis untouched); head/hands/
  * hips/feet scale the whole part.
+ *
+ * `bodyShape` (optional) applies the VRoid-style semantic layer on top: girth
+ * and whole-part factors (same two patterns) plus LENGTH scaling — the bone's
+ * length axis grows and only the children's scale on that axis is divided
+ * back, so the child joints ride outward with the stretched flesh and the
+ * limb actually gets longer.
  */
-export function applyAllBoneScales(vrm: VRM, boneScale: Record<string, number>): void {
+export function applyAllBoneScales(
+  vrm: VRM,
+  boneScale: Record<string, number>,
+  bodyShape?: Record<string, number>,
+): void {
   if (!vrm.humanoid) return;
 
   // 1) restore file rest for editable bones and the children compensation touches
@@ -325,17 +392,85 @@ export function applyAllBoneScales(vrm: VRM, boneScale: Record<string, number>):
       }
     }
   }
+
+  if (bodyShape) applyBodyShape(vrm, bodyShape);
+}
+
+/** The VRoid-style semantic layer: girth (thicken), whole-part uniform scales
+ *  and length scaling, applied after the per-bone boneScale pass. */
+function applyBodyShape(vrm: VRM, bodyShape: Record<string, number>): void {
+  // Girth + whole-part factors — the same two patterns as the boneScale pass.
+  for (const [param, value] of Object.entries(bodyShape)) {
+    if (value == null || Math.abs(value - 1) < 0.005) continue;
+    const girth = BODY_SHAPE_GIRTH[param as BodyShapeParam];
+    const uniform = BODY_SHAPE_UNIFORM[param as BodyShapeParam];
+    for (const bone of [...(girth ?? []), ...(uniform ?? [])]) {
+      const node = rawBoneNode(vrm, bone);
+      if (!node) continue;
+      if (girth?.includes(bone)) {
+        const axis = boneLengthAxis(vrm, bone, node);
+        const fx = axis === 0 ? 1 : value;
+        const fy = axis === 1 ? 1 : value;
+        const fz = axis === 2 ? 1 : value;
+        node.scale.set(node.scale.x * fx, node.scale.y * fy, node.scale.z * fz);
+        for (const child of node.children) {
+          child.scale.set(child.scale.x / fx, child.scale.y / fy, child.scale.z / fz);
+          child.position.set(child.position.x / fx, child.position.y / fy, child.position.z / fz);
+        }
+      } else {
+        node.scale.multiplyScalar(value);
+        if (COMPENSATE_CHILD_SCALE.has(bone)) {
+          for (const child of node.children) child.scale.divideScalar(value);
+        }
+      }
+    }
+  }
+
+  // Length pass — parents first. Grow the bone's length axis; only the
+  // children's scale on that axis is divided back, so their joints ride
+  // outward with the stretched flesh and the limb actually gets longer.
+  for (const bone of BONE_ORDER) {
+    for (const [param, bones] of Object.entries(BODY_SHAPE_LENGTH)) {
+      if (!bones.includes(bone)) continue;
+      const value = bodyShape[param];
+      if (value == null || Math.abs(value - 1) < 0.005) continue;
+      const factor = bodyShapeLengthFactor(param as BodyShapeParam, value, bone);
+      if (Math.abs(factor - 1) < 0.005) continue;
+      const node = rawBoneNode(vrm, bone);
+      if (!node) continue;
+      const axis = boneLengthAxis(vrm, bone, node);
+      const fx = axis === 0 ? factor : 1;
+      const fy = axis === 1 ? factor : 1;
+      const fz = axis === 2 ? factor : 1;
+      node.scale.set(node.scale.x * fx, node.scale.y * fy, node.scale.z * fz);
+      for (const child of node.children) {
+        child.scale.set(child.scale.x / fx, child.scale.y / fy, child.scale.z / fz);
+      }
+    }
+  }
 }
 
 /**
- * Vertical hips offset (metres) that keeps the feet planted when the whole
- * body is scaled: uniform hips scaling grows the legs downward too, sinking
- * the model through the floor by exactly the leg-length growth.
+ * Vertical hips offset (metres) that keeps the feet planted when the legs
+ * grow: whole-body hips scaling (the per-bone Proportions slider) sinks the
+ * model by the leg-length growth, and so do the VRoid-style height / leg
+ * length sliders — each lifts the hips by exactly its own leg growth.
  */
-export function hipsLiftOffset(boneScale: Record<string, number>, restHipsY: number, restFeetY: number): number {
-  const factor = boneScale.hips ?? 1;
-  if (Math.abs(factor - 1) < 0.005) return 0;
-  return (factor - 1) * Math.max(0, restHipsY - restFeetY);
+export function hipsLiftOffset(
+  boneScale: Record<string, number>,
+  bodyShape: Record<string, number> | undefined,
+  restHipsY: number,
+  restFeetY: number,
+): number {
+  const span = Math.max(0, restHipsY - restFeetY);
+  let lift = 0;
+  const hipsFactor = boneScale.hips ?? 1;
+  if (Math.abs(hipsFactor - 1) > 0.005) lift += (hipsFactor - 1) * span;
+  if (bodyShape) {
+    const legFactor = legLengthFactor(bodyShape);
+    if (Math.abs(legFactor - 1) > 0.005) lift += (legFactor - 1) * span;
+  }
+  return lift;
 }
 
 /**
@@ -352,6 +487,33 @@ export function applyHipsLift(vrm: VRM, lift: number): void {
   if (!hips || !parent) return;
   if (Math.abs(parent.scale.x - 1) > 1e-4 || Math.abs(parent.scale.y - 1) > 1e-4) return;
   if (lift !== 0) hips.position.y += lift;
+}
+
+// --- Face shape (VRoid eye-adjust bones) ---
+
+/**
+ * Apply the face-shape edits to the model's eye-adjust bones
+ * (J_Adj_L/R_FaceEye — present on VRoid-exported models): eye size scales the
+ * eye region, height/spacing nudge both eyes vertically / apart. Bones reset
+ * to the file rest first, so the apply is idempotent. Models without the
+ * bones (non-VRoid rigs) are unaffected.
+ */
+export function applyFaceShape(vrm: VRM, face: Record<string, number> | undefined): void {
+  const s = face?.eyeSize ?? 1;
+  const h = face?.eyeHeight ?? 0;
+  const w = face?.eyeSpacing ?? 0;
+  for (const boneName of EYE_ADJ_BONES) {
+    const node = vrm.scene.getObjectByName(boneName);
+    if (!node) continue;
+    const rest = nodeRest(node);
+    node.position.set(rest.pos[0], rest.pos[1], rest.pos[2]);
+    node.scale.set(rest.scale[0], rest.scale[1], rest.scale[2]);
+    if (Math.abs(s - 1) < 0.005 && Math.abs(h) < 0.001 && Math.abs(w) < 0.001) continue;
+    const side = boneName.includes('_L_') ? 1 : -1;
+    node.scale.multiplyScalar(s);
+    node.position.x += side * w * 0.01; // metres, mirrored per eye
+    node.position.y += h * 0.01;
+  }
 }
 
 export function restBoneScale(vrm: VRM, bone: string): [number, number, number] {
@@ -378,7 +540,8 @@ export function applyAllEdits(vrm: VRM, edits: ModelEdits): void {
       manager.setValue(name, weight);
     }
   }
-  applyAllBoneScales(vrm, edits.boneScale);
+  applyAllBoneScales(vrm, edits.boneScale, edits.bodyShape);
+  applyFaceShape(vrm, edits.face);
 }
 
 /**

@@ -61,6 +61,23 @@ const listOutfits = obj(
   {},
 );
 
+const listWardrobe = obj(
+  'List the wardrobe style donors (other VRM files that provide hair/clothes): each donor with its wearable parts {id, label, category} and what is currently worn. First call may take a moment (donors load lazily). Use wear_item to put a part on the current model.',
+  {},
+);
+
+const wearItem = obj(
+  'Wear a wardrobe part from a donor VRM onto the current model — swaps in a different hairstyle, top, pants, shoes etc. and hides the model\'s own parts of the same category. donor and id come from list_wardrobe.',
+  { donor: { type: 'string', description: 'Donor name from list_wardrobe' }, id: { type: 'string', description: 'Part id from list_wardrobe' } },
+  ['donor', 'id'],
+);
+
+const unwearItem = obj(
+  'Take a worn wardrobe part off the current model. donor and id come from list_wardrobe.',
+  { donor: { type: 'string', description: 'Donor name from list_wardrobe' }, id: { type: 'string', description: 'Part id from list_wardrobe' } },
+  ['donor', 'id'],
+);
+
 // --- Animation ---
 
 const getAnimation = obj(
@@ -339,6 +356,9 @@ export const TOOL_DEFS: ToolDef[] = [
   named(listExpressions, 'list_expressions'),
   named(listModels, 'list_models'),
   named(listOutfits, 'list_outfits'),
+  named(listWardrobe, 'list_wardrobe'),
+  named(wearItem, 'wear_item'),
+  named(unwearItem, 'unwear_item'),
   named(getAnimation, 'get_animation'),
   named(setAnimation, 'set_animation'),
   named(newAnimation, 'new_animation'),

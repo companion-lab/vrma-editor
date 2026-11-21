@@ -7,8 +7,9 @@
 
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
-import { Matrix4 } from 'three';
+import { Matrix4, type Object3D } from 'three';
 import { BONE_ORDER } from '../humanoid';
+import { collapseOutlineMaterialGroups, syncMToonUniforms } from '../vrmedit/live';
 import {
   collectParts,
   collectWholeMeshes,
@@ -28,6 +29,11 @@ export interface DonorSource {
   /** Humanoid bone name → FILE rest-pose world matrix (donor scene is kept
    *  unrotated, so this is the glTF file's own rest pose). */
   restWorlds: Map<string, Matrix4>;
+  /** EVERY node → FILE rest-pose world matrix, captured at load before any
+   *  sync mutates the humanoid bones. The live rebind needs the rest world of
+   *  each skeleton joint (incl. non-humanoid sub-bones) to remap its inverse
+   *  bind through the nearest humanoid ancestor (wear.ts rebindWornMeshes). */
+  restNodes: Map<Object3D, Matrix4>;
 }
 
 const DONORS = new Map<string, DonorSource>();
@@ -88,15 +94,25 @@ export async function loadDonor(name: string, url: string, bytes?: ArrayBuffer):
   VRMUtils.removeUnnecessaryVertices(gltf.scene);
   VRMUtils.combineSkeletons(gltf.scene);
   registerPartAssociations(vrm, gltf.parser.associations);
+  // Donor meshes are only ever rendered as worn parts: collapse MToon outline
+  // groups onto their fill material so hidden layers (alpha-discarded by the
+  // fill, e.g. AvatarSample_B's coat-skirt lining) can't leak through the
+  // outline pass, and keep the alphaTest shader uniform in sync with the
+  // material property (some parses initialize the uniform to 0, which would
+  // let those hidden layers render solid) — live.ts.
+  collapseOutlineMaterialGroups(vrm);
+  syncMToonUniforms(vrm);
 
-  // Capture the donor's humanoid rest pose (file space) while the bones are
-  // still pristine — the per-frame bone sync overwrites them once worn.
+  // Capture the donor's rest pose (file space) while the bones are still
+  // pristine — the per-frame bone sync overwrites humanoid bones once worn.
   vrm.scene.updateMatrixWorld(true);
   const restWorlds = new Map<string, Matrix4>();
   for (const bone of BONE_ORDER) {
     const node = vrm.humanoid?.getRawBoneNode(bone as never);
     if (node) restWorlds.set(bone, new Matrix4().copy(node.matrixWorld));
   }
+  const restNodes = new Map<Object3D, Matrix4>();
+  vrm.scene.traverse((o) => restNodes.set(o, new Matrix4().copy(o.matrixWorld)));
 
   const donor: DonorSource = {
     name,
@@ -105,6 +121,7 @@ export async function loadDonor(name: string, url: string, bytes?: ArrayBuffer):
     bytes,
     parts: [...collectParts(vrm), ...collectWholeMeshes(vrm)],
     restWorlds,
+    restNodes,
   };
   DONORS.set(name, donor);
   return donor;

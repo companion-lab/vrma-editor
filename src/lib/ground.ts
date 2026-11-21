@@ -50,6 +50,7 @@ export function bakeGroundFeet(
   restHips: Vector3,
   restFeetY: number,
   boneScale: Record<string, number> = {},
+  bodyShape: Record<string, number> = {},
 ): GroundBakeResult {
   const empty: GroundBakeResult = { hipsTrack: [], sampled: 0, maxDrop: 0, maxLift: 0 };
   const humanoid = vrm.humanoid;
@@ -64,7 +65,7 @@ export function bakeGroundFeet(
   // Animation-space -> model-space hips scale (same ratio applyPose applies).
   const s = animRestY > 1e-3 ? restHips.y / animRestY : 1;
   // Whole-body hips lift from bone proportions — part of what playback renders.
-  const lift = hipsLiftOffset(boneScale, restHips.y, restFeetY);
+  const lift = hipsLiftOffset(boneScale, bodyShape, restHips.y, restFeetY);
   // Rest hips height above the ground; bounds the correction for degenerate poses.
   const H = Math.max(0.1, restHips.y - restFeetY);
 

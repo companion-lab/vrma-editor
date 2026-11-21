@@ -9,7 +9,17 @@ import { bakeWornParts } from '../wardrobe/bake';
 import type { WornRef } from '../wardrobe/wear';
 import { appendImage, copyBin, mimeTypeFor, parseGlb, writeGlb } from './glb';
 import { parsePartId } from './parts';
-import { COMPENSATE_CHILD_SCALE, LENGTH_AXIS_CHILD, THICKEN_BONES } from './proportions';
+import {
+  BODY_SHAPE_GIRTH,
+  BODY_SHAPE_LENGTH,
+  BODY_SHAPE_UNIFORM,
+  COMPENSATE_CHILD_SCALE,
+  LENGTH_AXIS_CHILD,
+  THICKEN_BONES,
+  bodyShapeLengthFactor,
+  legLengthFactor,
+  type BodyShapeParam,
+} from './proportions';
 
 // VRM 0.x blendshape preset names ↔ VRM 1.0 expression presets.
 // Mirrors three-vrm's v0v1PresetNameMap so names seen in the editor
@@ -64,7 +74,8 @@ export async function exportEditedModel(
   // binds are computed against the file's rest pose (exactly what the live
   // preview binds against), and proportion scaling then rides the joints.
   binBuf = bakeWornParts(json, binBuf, worn ?? []);
-  applyBoneScaleEdits(json, edits.boneScale);
+  applyBoneScaleEdits(json, edits.boneScale, edits.bodyShape);
+  applyFaceShapeEdits(json, edits.face);
   return writeGlb(json, binBuf);
 }
 
@@ -478,7 +489,8 @@ function nodeHeightY(json: Record<string, any>, idx: number): number {
 
 /** Hips height above the lowest foot/toe node — the lift a whole-body hips
  *  scale needs so the model keeps standing on the floor. 0 when unknown. */
-function hipsToFeetDistance(json: Record<string, any>, hipsIdx: number): number {
+function hipsToFeetDistance(json: Record<string, any>, hipsIdx: number | null): number {
+  if (hipsIdx == null) return 0;
   const feet = ['leftFoot', 'rightFoot', 'leftToes', 'rightToes']
     .map((b) => humanoidBoneNode(json, b))
     .filter((i): i is number => i != null);
@@ -487,7 +499,33 @@ function hipsToFeetDistance(json: Record<string, any>, hipsIdx: number): number 
   return Math.max(0, hipsY - Math.min(...feet.map((i) => nodeHeightY(json, i))));
 }
 
-function applyBoneScaleEdits(json: Record<string, any>, boneScale: Record<string, number>): void {
+function applyFaceShapeEdits(json: Record<string, any>, face: Record<string, number> = {}): void {
+  // VRoid eye-adjust bones (J_Adj_L/R_FaceEye): mirror the live face sliders —
+  // uniform scale for eye size, local translation offsets for eye height and
+  // spacing. Nodes are matched by name; models without them are unaffected.
+  const s = face.eyeSize ?? 1;
+  const h = face.eyeHeight ?? 0;
+  const w = face.eyeSpacing ?? 0;
+  if (Math.abs(s - 1) < 0.005 && Math.abs(h) < 0.001 && Math.abs(w) < 0.001) return;
+  for (const node of json.nodes ?? []) {
+    const name = node.name ?? '';
+    if (!/J_Adj_(L|R)_FaceEye/.test(name)) continue;
+    const side = name.includes('_L_') ? 1 : -1;
+    node.scale = (node.scale ?? [1, 1, 1]).map((v: number) => v * s);
+    const t = node.translation ?? [0, 0, 0];
+    node.translation = [t[0] + side * w * 0.01, t[1] + h * 0.01, t[2]];
+  }
+}
+
+function applyBoneScaleEdits(
+  json: Record<string, any>,
+  boneScale: Record<string, number>,
+  bodyShape: Record<string, number> = {},
+): void {
+  // Original hips→feet span — the anchor for the length-growth hips lift
+  // (measured before any scaling, parents-first ordering keeps it valid).
+  const span0 = hipsToFeetDistance(json, humanoidBoneNode(json, 'hips') as number);
+
   // Parents first (BONE_ORDER is depth-first), multiplying/dividing CURRENT
   // values — identical to the live preview, so adjacent segments compose the
   // same way and the export matches what the user saw.
@@ -537,6 +575,93 @@ function applyBoneScaleEdits(json: Record<string, any>, boneScale: Record<string
           node.translation = [t[0], t[1] + (factor - 1) * drop, t[2]];
         }
       }
+    }
+  }
+
+  // VRoid-style body shape: girth (thicken), whole-part uniform scales, then
+  // the length pass — the same three steps as the live applyAllBoneScales.
+  const girthOrUniform = new Set<string>();
+  for (const [param, value] of Object.entries(bodyShape)) {
+    if (value == null || Math.abs(value - 1) < 0.005) continue;
+    const girth = BODY_SHAPE_GIRTH[param as BodyShapeParam] ?? [];
+    const uniform = BODY_SHAPE_UNIFORM[param as BodyShapeParam] ?? [];
+    for (const bone of [...girth, ...uniform]) {
+      const nodeIdx = humanoidBoneNode(json, bone);
+      const node = nodeIdx != null ? json.nodes?.[nodeIdx] : null;
+      if (!node) continue;
+      const thicken = girth.includes(bone);
+      if (thicken) {
+        const axis = gltfLengthAxis(json, bone, node);
+        const fx = axis === 0 ? 1 : value;
+        const fy = axis === 1 ? 1 : value;
+        const fz = axis === 2 ? 1 : value;
+        const s = node.scale ?? [1, 1, 1];
+        node.scale = [s[0] * fx, s[1] * fy, s[2] * fz];
+        for (const ci of node.children ?? []) {
+          const child = json.nodes?.[ci];
+          if (!child) continue;
+          const cs = child.scale ?? [1, 1, 1];
+          child.scale = [cs[0] / fx, cs[1] / fy, cs[2] / fz];
+          if (child.translation) {
+            child.translation = [
+              child.translation[0] / fx,
+              child.translation[1] / fy,
+              child.translation[2] / fz,
+            ];
+          }
+        }
+      } else {
+        node.scale = (node.scale ?? [1, 1, 1]).map((v: number) => v * value);
+        if (COMPENSATE_CHILD_SCALE.has(bone)) {
+          for (const ci of node.children ?? []) {
+            const child = json.nodes?.[ci];
+            if (!child) continue;
+            const cs = child.scale ?? [1, 1, 1];
+            child.scale = [cs[0] / value, cs[1] / value, cs[2] / value];
+          }
+        }
+      }
+      girthOrUniform.add(bone);
+    }
+  }
+
+  // Length pass — grow the length axis, divide only the children's scale on
+  // that axis (their translations stay scaled, so joints ride outward).
+  for (const bone of BONE_ORDER) {
+    for (const [param, bones] of Object.entries(BODY_SHAPE_LENGTH)) {
+      if (!bones.includes(bone)) continue;
+      const value = bodyShape[param];
+      if (value == null || Math.abs(value - 1) < 0.005) continue;
+      const factor = bodyShapeLengthFactor(param as BodyShapeParam, value, bone);
+      if (Math.abs(factor - 1) < 0.005) continue;
+      const nodeIdx = humanoidBoneNode(json, bone);
+      const node = nodeIdx != null ? json.nodes?.[nodeIdx] : null;
+      if (!node) continue;
+      const axis = gltfLengthAxis(json, bone, node);
+      const fx = axis === 0 ? factor : 1;
+      const fy = axis === 1 ? factor : 1;
+      const fz = axis === 2 ? factor : 1;
+      const s = node.scale ?? [1, 1, 1];
+      node.scale = [s[0] * fx, s[1] * fy, s[2] * fz];
+      for (const ci of node.children ?? []) {
+        const child = json.nodes?.[ci];
+        if (!child) continue;
+        const cs = child.scale ?? [1, 1, 1];
+        child.scale = [cs[0] / fx, cs[1] / fy, cs[2] / fz];
+      }
+    }
+  }
+
+  // Legs (and the whole body) grew downward — lift the hips so the feet stay
+  // planted (mirrors the live hips lift). The boneScale.hips whole-body lift
+  // is applied in the main loop above.
+  const legFactor = legLengthFactor(bodyShape);
+  if (span0 > 0 && Math.abs(legFactor - 1) > 1e-4) {
+    const hipsIdx = humanoidBoneNode(json, 'hips');
+    const hips = hipsIdx != null ? json.nodes?.[hipsIdx] : null;
+    if (hips) {
+      const t = hips.translation ?? [0, 0, 0];
+      hips.translation = [t[0], t[1] + (legFactor - 1) * span0, t[2]];
     }
   }
 }

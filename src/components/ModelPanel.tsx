@@ -6,9 +6,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { ChevronDown, ChevronRight, Eye, EyeOff, FolderOpen, Image as ImageIcon, Plus, RotateCcw, Shirt, X } from 'lucide-react';
 import { useEditor, type ModelEdits, type OutfitPreset } from '../store';
-import { getDonor, loadDonor, WEARABLE_CATEGORIES } from '../lib/wardrobe/sources';
+import { getDonor, loadDonor, WEARABLE_CATEGORIES, type DonorSource } from '../lib/wardrobe/sources';
 import {
   applyAllBoneScales,
+  applyFaceShape,
   applyExpressionWeight,
   applyMaterialEdit,
   applyTextureReplacement,
@@ -29,10 +30,22 @@ import {
   type AssetPart,
 } from '../lib/vrmedit/parts';
 import {
+  BODY_SHAPE_MAX,
+  BODY_SHAPE_MIN,
+  BODY_SHAPE_PARAMS,
   PROPORTION_GROUPS,
   PROPORTION_MAX,
   PROPORTION_MIN,
 } from '../lib/vrmedit/proportions';
+import {
+  BROW_SWATCHES,
+  COLOR_GROUPS,
+  EYE_ADJ_BONES,
+  EYE_SWATCHES,
+  HAIR_SWATCHES,
+  SKIN_SWATCHES,
+  materialGroup,
+} from '../lib/vrmedit/appearance';
 
 const COLOR_SPACE = THREE.SRGBColorSpace;
 
@@ -319,106 +332,135 @@ function wornLabel(donor: string, id: string): string {
 function WardrobeSection() {
   const worn = useEditor((s) => s.worn);
   const library = useEditor((s) => s.wardrobeLibrary);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [parts, setParts] = useState<AssetPart[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [donorState, setDonorState] = useState<Record<string, 'loading' | 'ready' | 'error'>>({});
+  const [donorParts, setDonorParts] = useState<{ donor: string; parts: AssetPart[] }[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     useEditor.getState().fetchWardrobeLibrary();
   }, []);
 
-  const openDonor = async (name: string, url: string) => {
-    if (selected === name) {
-      setSelected(null);
-      return;
-    }
-    setBusy(name);
-    try {
-      const donor = await loadDonor(name, url);
-      setSelected(name);
-      setParts(donor.parts.filter((p) => WEARABLE_CATEGORIES.includes(p.category)));
-    } catch (err) {
-      console.error(err);
-      useEditor.getState().setStatus('error', `Wardrobe load failed: ${(err as Error).message}`);
-    } finally {
-      setBusy(null);
-    }
+  const addDonor = (donor: DonorSource) => {
+    setDonorParts((list) => [
+      ...list.filter((e) => e.donor !== donor.name),
+      { donor: donor.name, parts: donor.parts.filter((p) => WEARABLE_CATEGORIES.includes(p.category)) },
+    ]);
   };
 
+  // Load every library donor in the background so the list below covers all
+  // available styles without the user picking a donor first.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const selfName = useEditor.getState().modelName;
+      for (const d of library) {
+        // The current model is not its own wardrobe donor — its pieces are the
+        // Assets section's toggles, and self-wear would be a no-op.
+        if (d.name === selfName) continue;
+        const cached = getDonor(d.name);
+        if (cached) {
+          addDonor(cached);
+          continue;
+        }
+        setDonorState((s) => ({ ...s, [d.name]: 'loading' }));
+        try {
+          const donor = await loadDonor(d.name, d.url);
+          if (!alive) return;
+          addDonor(donor);
+          setDonorState((s) => ({ ...s, [d.name]: 'ready' }));
+        } catch (err) {
+          console.error(err);
+          if (!alive) return;
+          setDonorState((s) => ({ ...s, [d.name]: 'error' }));
+          useEditor.getState().setStatus('error', `Wardrobe load failed: ${(err as Error).message}`);
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [library]);
+
   const loadFile = async (file: File) => {
-    setBusy(file.name);
+    setDonorState((s) => ({ ...s, [file.name]: 'loading' }));
     try {
       const donor = await loadDonor(file.name, URL.createObjectURL(file));
-      setSelected(donor.name);
-      setParts(donor.parts.filter((p) => WEARABLE_CATEGORIES.includes(p.category)));
+      addDonor(donor);
+      setDonorState((s) => ({ ...s, [file.name]: 'ready' }));
       useEditor.getState().setStatus('ok', `Wardrobe "${file.name}" loaded`);
     } catch (err) {
       console.error(err);
+      setDonorState((s) => ({ ...s, [file.name]: 'error' }));
       useEditor.getState().setStatus('error', `Wardrobe load failed: ${(err as Error).message}`);
-    } finally {
-      setBusy(null);
     }
   };
 
-  // Group the selected donor's wearable parts by category.
+  // All donors' wearable parts in one list, grouped by category (top → … → other).
   const blocks = useMemo(() => {
-    const list = [...parts].sort(
-      (a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category) || a.label.localeCompare(b.label),
-    );
-    const out: { category: AssetPart['category']; rows: AssetPart[] }[] = [];
-    for (const p of list) {
+    const list = donorParts
+      .flatMap(({ donor, parts }) => parts.map((p) => ({ donor, p })))
+      .sort(
+        (a, b) =>
+          CATEGORY_ORDER.indexOf(a.p.category) - CATEGORY_ORDER.indexOf(b.p.category) ||
+          a.p.label.localeCompare(b.p.label) ||
+          a.donor.localeCompare(b.donor),
+      );
+    const out: { category: AssetPart['category']; rows: { donor: string; p: AssetPart }[] }[] = [];
+    for (const r of list) {
       const last = out[out.length - 1];
-      if (last?.category === p.category) last.rows.push(p);
-      else out.push({ category: p.category, rows: [p] });
+      if (last?.category === r.p.category) last.rows.push(r);
+      else out.push({ category: r.p.category, rows: [r] });
     }
     return out;
-  }, [parts]);
+  }, [donorParts]);
 
   const isWorn = (donor: string, id: string) => worn.some((w) => w.donor === donor && w.id === id);
+  const loadingCount = Object.values(donorState).filter((s) => s === 'loading').length;
+  const errorCount = Object.values(donorState).filter((s) => s === 'error').length;
 
   return (
     <div className="assets-body">
-      <div className="outfit-bar">
-        {library.length > 0 && (
-          <div className="outfit-chips">
-            {library.map((d) => (
-              <button
-                key={d.url}
-                className={`outfit-chip ${selected === d.name ? 'active' : ''}`}
-                title={`Show wearable parts of "${d.name}"`}
-                onClick={() => openDonor(d.name, d.url)}
-              >
-                <Shirt size={11} /> {busy === d.name ? 'loading…' : d.name}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="outfit-save">
-          <button className="btn small" onClick={() => fileRef.current?.click()}>
-            <Plus size={12} /> Load file…
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".vrm,.glb,.gltf"
-            hidden
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) loadFile(f);
-              e.target.value = '';
-            }}
-          />
-          {worn.length > 0 && (
-            <button
-              className="btn small"
-              title="Take off everything worn from wardrobe donors"
-              onClick={() => useEditor.getState().clearWorn()}
+      {library.length > 0 && (
+        <div className="outfit-chips">
+          {library.map((d) => (
+            <span
+              key={d.url}
+              className={`outfit-chip static ${donorState[d.name] === 'error' ? 'donor-error' : ''}`}
+              title={
+                donorState[d.name] === 'error'
+                  ? `Failed to load "${d.name}"`
+                  : `Style source: ${d.name}`
+              }
             >
-              <X size={12} /> Clear all
-            </button>
-          )}
+              <Shirt size={11} /> {donorState[d.name] === 'loading' ? `${d.name} (loading…)` : d.name}
+            </span>
+          ))}
         </div>
+      )}
+      <div className="outfit-save">
+        <button className="btn small" onClick={() => fileRef.current?.click()}>
+          <Plus size={12} /> Load file…
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".vrm,.glb,.gltf"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) loadFile(f);
+            e.target.value = '';
+          }}
+        />
+        {worn.length > 0 && (
+          <button
+            className="btn small"
+            title="Take off everything worn from wardrobe donors"
+            onClick={() => useEditor.getState().clearWorn()}
+          >
+            <X size={12} /> Clear all
+          </button>
+        )}
       </div>
 
       {worn.length > 0 && (
@@ -444,40 +486,55 @@ function WardrobeSection() {
         </div>
       )}
 
-      {selected && (
-        <div className="mesh-list-wrap">
-          <div className="mesh-list">
-            {blocks.length === 0 && <div className="muted pad">No wearable parts in this file.</div>}
-            {blocks.map((b) => (
-              <div key={b.category} className="asset-cat">
-                <div className="asset-cat-head">{CATEGORY_LABEL[b.category]}</div>
-                {b.rows.map((p) => {
-                  const on = isWorn(selected, p.id);
-                  return (
-                    <button
-                      key={p.id}
-                      className={`mesh-row ${on ? 'worn-part' : ''}`}
-                      title={on ? 'Take this part off' : 'Wear this part (hides your model’s own pieces of this kind)'}
-                      onClick={() =>
-                        on
-                          ? useEditor.getState().unwearPart(selected, p.id)
-                          : useEditor.getState().wearPart(selected, p.id, p.category)
-                      }
-                    >
-                      {on ? <Eye size={12} /> : <Shirt size={12} />}
-                      <span className="mesh-name" title={p.label}>{p.label}</span>
-                      {on && <span className="asset-owner">worn</span>}
-                    </button>
-                  );
-                })}
+      <div className="mesh-list-wrap">
+        <div className="mesh-list">
+          {blocks.length === 0 &&
+            (donorParts.length === 0 ? (
+              <div className="muted pad">
+                {loadingCount > 0 || (library.length > 0 && errorCount === 0)
+                  ? 'Loading style donors…'
+                  : errorCount > 0
+                    ? 'Couldn’t load the donor styles — check the status bar.'
+                    : 'No donor styles yet — click “Load file…” to open a .vrm with hair / clothes, or drop files into assets/wardrobe/.'}
               </div>
+            ) : (
+              <div className="muted pad">No wearable parts in these files.</div>
             ))}
-          </div>
-          <div className="muted small-note">
-            picking another model here swaps its clothes / hair onto yours · the look bakes into “Save model”
-          </div>
+          {blocks.map((b) => (
+            <div key={b.category} className="asset-cat">
+              <div className="asset-cat-head">{CATEGORY_LABEL[b.category]}</div>
+              {b.rows.map(({ donor, p }) => {
+                const on = isWorn(donor, p.id);
+                return (
+                  <button
+                    key={`${donor}:${p.id}`}
+                    className={`mesh-row ${on ? 'worn-part' : ''}`}
+                    title={
+                      on
+                        ? 'Take this part off'
+                        : `Wear this part from "${donor}" (hides your model’s own pieces of this kind)`
+                    }
+                    onClick={() =>
+                      on
+                        ? useEditor.getState().unwearPart(donor, p.id)
+                        : useEditor.getState().wearPart(donor, p.id, p.category)
+                    }
+                  >
+                    {on ? <Eye size={12} /> : <Shirt size={12} />}
+                    <span className="mesh-name" title={p.label}>{p.label}</span>
+                    <span className="asset-owner" title={`From "${donor}"`}>{donor}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
-      )}
+        {blocks.length > 0 && (
+          <div className="muted small-note">
+            wearing a donor part hides your model’s own pieces of the same kind · the look bakes into “Save model”
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -746,7 +803,7 @@ function ProportionsSection({ edits }: { edits: ModelEdits }) {
   const apply = (bones: string[], factor: number) => {
     for (const b of bones) useEditor.getState().setBoneScale(b, factor);
     // Recompute every bone from the edit map (reset + parents-first apply).
-    applyAllBoneScales(vrm, useEditor.getState().modelEdits.boneScale);
+    applyAllBoneScales(vrm, useEditor.getState().modelEdits.boneScale, useEditor.getState().modelEdits.bodyShape);
   };
 
   return (
@@ -795,6 +852,234 @@ function ProportionsSection({ edits }: { edits: ModelEdits }) {
   );
 }
 
+// --- Body shape (VRoid-style) ---
+
+function BodyShapeSection({ edits }: { edits: ModelEdits }) {
+  const vrm = useEditor((s) => s.vrm);
+  if (!vrm) return null;
+
+  const apply = (param: string, factor: number) => {
+    useEditor.getState().setBodyShape(param, factor);
+    // Recompute every bone from both edit maps (reset + parents-first apply).
+    const e = useEditor.getState().modelEdits;
+    applyAllBoneScales(vrm, e.boneScale, e.bodyShape);
+  };
+
+  const isDefault = Object.keys(edits.bodyShape).length === 0;
+
+  return (
+    <>
+      <div className="btn-row">
+        <button className="btn small" disabled={isDefault} onClick={() => useEditor.getState().resetBodyShape()}>
+          <RotateCcw size={12} /> Reset all
+        </button>
+        <span className="muted small-note">
+          VRoid-style body sliders — height &amp; limb length keep the feet on the ground
+        </span>
+      </div>
+      {BODY_SHAPE_PARAMS.map(({ param, label }) => {
+        const factor = edits.bodyShape[param] ?? 1;
+        return (
+          <div className="ctl-row" key={param}>
+            <span className="expr-name">{label}</span>
+            <input
+              type="range"
+              min={BODY_SHAPE_MIN}
+              max={BODY_SHAPE_MAX}
+              step={0.01}
+              value={factor}
+              onChange={(e) => apply(param, parseFloat(e.target.value))}
+            />
+            <span className="ctl-val">×{factor.toFixed(2)}</span>
+            <button
+              className="btn small"
+              title={`Reset ${label} to ×1.00`}
+              aria-label={`Reset ${label}`}
+              disabled={Math.abs(factor - 1) < 0.005}
+              onClick={() => apply(param, 1)}
+            >
+              <RotateCcw size={11} />
+            </button>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+// --- Face (VRoid eye sliders) ---
+
+const FACE_SLIDERS: { param: string; label: string; min: number; max: number }[] = [
+  { param: 'eyeSize', label: 'Eye size', min: 0.5, max: 1.5 },
+  { param: 'eyeHeight', label: 'Eye height', min: -1, max: 1 },
+  { param: 'eyeSpacing', label: 'Eye spacing', min: -1, max: 1 },
+];
+
+function FaceSection({ edits }: { edits: ModelEdits }) {
+  const vrm = useEditor((s) => s.vrm);
+  if (!vrm) return null;
+  // VRoid eye-adjust bones only exist on VRoid-exported rigs.
+  if (!EYE_ADJ_BONES.every((b) => vrm.scene.getObjectByName(b))) {
+    return <div className="muted pad">This model has no adjustable face bones.</div>;
+  }
+
+  const apply = (param: string, value: number) => {
+    useEditor.getState().setFaceShape(param, value);
+    applyFaceShape(vrm, useEditor.getState().modelEdits.face);
+  };
+
+  return (
+    <>
+      <div className="btn-row">
+        <button
+          className="btn small"
+          disabled={Object.keys(edits.face).length === 0}
+          onClick={() => {
+            useEditor.getState().resetFaceShape();
+            applyFaceShape(vrm, useEditor.getState().modelEdits.face);
+          }}
+        >
+          <RotateCcw size={12} /> Reset all
+        </button>
+        <span className="muted small-note">VRoid eye-adjust bones reshape the eye region</span>
+      </div>
+      {FACE_SLIDERS.map(({ param, label, min, max }) => {
+        const value = edits.face[param] ?? (param === 'eyeSize' ? 1 : 0);
+        return (
+          <div className="ctl-row" key={param}>
+            <span className="expr-name">{label}</span>
+            <input
+              type="range"
+              min={min}
+              max={max}
+              step={0.01}
+              value={value}
+              onChange={(e) => apply(param, parseFloat(e.target.value))}
+            />
+            <span className="ctl-val">{param === 'eyeSize' ? `\u00d7${value.toFixed(2)}` : value.toFixed(2)}</span>
+            <button
+              className="btn small"
+              title={`Reset ${label}`}
+              aria-label={`Reset ${label}`}
+              disabled={Math.abs(value - (param === 'eyeSize' ? 1 : 0)) < 0.005}
+              onClick={() => apply(param, param === 'eyeSize' ? 1 : 0)}
+            >
+              <RotateCcw size={11} />
+            </button>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+// --- Colors (semantic material groups) ---
+
+function ColorGroupRow({
+  group,
+  swatches,
+  vrm,
+  edits,
+}: {
+  group: { key: string; label: string };
+  swatches: string[];
+  vrm: THREE.Object3D extends never ? never : any;
+  edits: ModelEdits;
+}) {
+  if (!vrm) return null;
+  const materials = collectMaterials(vrm).filter((m) => materialGroup(m.name) === group.key);
+  if (materials.length === 0) return null;
+  const names = materials.map((m) => m.name.replace(/ \(Outline\)$/, ''));
+  const asColorMat = (m: any) => m as { color?: THREE.Color };
+
+  const edited = names.some((n) => edits.materials[n]?.color);
+  const liveColor = (() => {
+    const editedColor = names.map((n) => edits.materials[n]?.color).find(Boolean);
+    if (editedColor) return linearToHex(editedColor);
+    const withColor = materials.find((m) => asColorMat(m).color);
+    if (!withColor) return '#ffffff';
+    const c = asColorMat(withColor).color;
+    if (!c) return '#ffffff';
+    return linearToHex([c.r, c.g, c.b]);
+  })();
+
+  const apply = (hex: string) => {
+    const linear = hexToLinear(hex);
+    for (const n of names) {
+      useEditor.getState().setMaterialEdit(n, { color: linear });
+      applyMaterialEdit(vrm, n, { color: linear });
+    }
+  };
+  const reset = () => {
+    for (const n of names) {
+      useEditor.getState().resetMaterialEdit(n);
+      for (const m of materialsFor(vrm, n)) applyMaterialEdit(vrm, n, {});
+    }
+  };
+
+  return (
+    <div className="ctl-row" style={{ flexWrap: 'wrap' }}>
+      <span className="expr-name" style={{ minWidth: 44 }}>{group.label}</span>
+      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap', flex: 1, alignItems: 'center' }}>
+        {swatches.map((hex) => (
+          <button
+            key={hex}
+            title={`${group.label} ${hex}`}
+            aria-label={`${group.label} ${hex}`}
+            onClick={() => apply(hex)}
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: 4,
+              border: '1px solid var(--border)',
+              background: hex,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          />
+        ))}
+        <input
+          type="color"
+          title={`Custom ${group.label.toLowerCase()} color`}
+          value={liveColor}
+          onChange={(e) => apply(e.target.value)}
+          style={{ width: 24, height: 20, padding: 0, border: '1px solid var(--border)', background: 'none' }}
+        />
+        <button
+          className="btn small"
+          title={`Reset ${group.label} to the model's original color`}
+          aria-label={`Reset ${group.label}`}
+          disabled={!edited}
+          onClick={reset}
+        >
+          <RotateCcw size={11} />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function ColorsSection({ edits }: { edits: ModelEdits }) {
+  const vrm = useEditor((s) => s.vrm);
+  if (!vrm) return null;
+  const groups = [
+    { group: COLOR_GROUPS[0], swatches: SKIN_SWATCHES },
+    { group: COLOR_GROUPS[1], swatches: HAIR_SWATCHES },
+    { group: COLOR_GROUPS[2], swatches: EYE_SWATCHES },
+    { group: COLOR_GROUPS[3], swatches: BROW_SWATCHES },
+  ];
+  return (
+    <>
+      <div className="btn-row">
+        <span className="muted small-note">tints every material of the part · baked into Save model</span>
+      </div>
+      {groups.map(({ group, swatches }) => (
+        <ColorGroupRow key={group.key} group={group} swatches={swatches} vrm={vrm} edits={edits} />
+      ))}
+    </>
+  );
+}
+
 // --- Panel ---
 
 export function ModelPanel() {
@@ -810,11 +1095,11 @@ export function ModelPanel() {
         Editing <b title={modelName}>{modelName}</b> — changes preview live; use
         <b> Save model</b> (toolbar) to download an edited .vrm.
       </div>
+      <Section title="Wardrobe">
+        <WardrobeSection />
+      </Section>
       <Section title="Materials">
         <MaterialsSection edits={edits} />
-      </Section>
-      <Section title="Wardrobe" defaultOpen={false}>
-        <WardrobeSection />
       </Section>
       <Section title="Assets">
         <AssetsSection edits={edits} />
@@ -824,6 +1109,15 @@ export function ModelPanel() {
       </Section>
       <Section title="Meta">
         <MetaSection edits={edits} />
+      </Section>
+      <Section title="Face">
+        <FaceSection edits={edits} />
+      </Section>
+      <Section title="Colors">
+        <ColorsSection edits={edits} />
+      </Section>
+      <Section title="Body shape">
+        <BodyShapeSection edits={edits} />
       </Section>
       <Section title="Proportions">
         <ProportionsSection edits={edits} />

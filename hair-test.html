@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <body style="margin:0">
+    <script type="module">
+      import * as THREE from 'three';
+      import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+      import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+      window.__ready = false;
+      const which = location.hash.slice(1) || 'three-vrm-girl.vrm';
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(900, 900);
+      document.body.appendChild(renderer.domElement);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf0f0f4);
+      const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
+      camera.position.set(0, 1.0, 4.2);
+      camera.lookAt(0, 0.8, 0);
+      scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+      const dir = new THREE.DirectionalLight(0xffffff, 1.6);
+      dir.position.set(1, 2, 2);
+      scene.add(dir);
+      const res = await fetch('/wardrobe/' + which);
+      const buf = await res.arrayBuffer();
+      const loader = new GLTFLoader();
+      loader.register((p) => new VRMLoaderPlugin(p));
+      const gltf = await loader.parseAsync(buf, '');
+      const vrm = gltf.userData.vrm;
+      VRMUtils.removeUnnecessaryVertices(gltf.scene);
+      VRMUtils.combineSkeletons(gltf.scene);
+      VRMUtils.rotateVRM0(vrm);
+      scene.add(vrm.scene);
+      window.__vrm = vrm;
+      window.__camera = camera;
+      window.__scene = scene;
+      window.__showOnly = (re) => {
+        let n = 0;
+        vrm.scene.traverse((o) => { if (o.isSkinnedMesh) { o.visible = new RegExp(re).test(o.name); if (o.visible) n++; } });
+        return n;
+      };
+      window.__ready = true;
+      const clock = new THREE.Clock();
+      function tick() {
+        requestAnimationFrame(tick);
+        vrm.update(clock.getDelta());
+        renderer.render(scene, camera);
+      }
+      tick();
+    </script>
+  </body>
+</html>

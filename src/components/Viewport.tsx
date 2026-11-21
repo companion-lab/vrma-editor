@@ -10,7 +10,7 @@ import { liveTracker } from '../lib/mocap/live';
 import { SkeletonOverlay, setSkeletonTheme } from '../lib/skeleton';
 import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
-import { applyAllEdits, applyHipsLift, collectMaterials, hipsLiftOffset, snapshotMaterials, stripOutlineSuffix } from '../lib/vrmedit/live';
+import { applyAllEdits, applyHipsLift, collapseOutlineMaterialGroups, collectMaterials, hipsLiftOffset, snapshotMaterials, stripOutlineSuffix, syncMToonUniforms } from '../lib/vrmedit/live';
 import { registerPartAssociations } from '../lib/vrmedit/parts';
 import { updateWornParts, captureTargetRestWorlds, wardrobeGroup } from '../lib/wardrobe/wear';
 import { registerViewport } from '../lib/ai/sceneRef';
@@ -134,7 +134,7 @@ export function Viewport() {
         // Whole-body hips scale: the humanoid sync above resets the hips node
         // from the normalized rig every frame, so re-apply the lift that keeps
         // the feet on the floor (the same offset is baked in on export).
-        applyHipsLift(vrm, hipsLiftOffset(st.modelEdits.boneScale, st.restHipsPos.y, st.restFeetY));
+        applyHipsLift(vrm, hipsLiftOffset(st.modelEdits.boneScale, st.modelEdits.bodyShape, st.restHipsPos.y, st.restFeetY));
         // Worn wardrobe parts follow the (now fully posed) skeleton; donor
         // springbones step here too, before the render updates world matrices.
         updateWornParts(dt, vrm);
@@ -326,6 +326,12 @@ export function Viewport() {
       VRMUtils.removeUnnecessaryVertices(gltf.scene);
       VRMUtils.combineSkeletons(gltf.scene);
       VRMUtils.rotateVRM0(vrm);
+      // MToon outline groups ignore the main texture's alpha — hidden layers
+      // (alpha-discarded by the fill) would leak as solid geometry. Render
+      // outline groups with their fill material and keep the alphaTest uniform
+      // in sync (live.ts).
+      collapseOutlineMaterialGroups(vrm);
+      syncMToonUniforms(vrm);
 
       refs.vrmRoot.clear();
       refs.vrmRoot.add(vrm.scene);

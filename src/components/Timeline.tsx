@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   CircleDot,
   ClipboardPaste,
@@ -45,6 +45,8 @@ interface RowInfo {
   /** Display-only row (the "All tracks" summary): no key interactions. */
   passive?: boolean;
 }
+
+type MenuItem = { label: string; run?: () => void; disabled?: boolean; danger?: boolean } | 'sep';
 
 /** Key times captured when a group drag starts — every pointer move sets
  *  absolute snapshot.t + delta, so the block follows the cursor 1:1. */
@@ -112,9 +114,10 @@ const TrackRow = memo(function TrackRow({
   onDiamondDown,
   onDiamondMove,
   onDiamondUp,
-  onDiamondDelete,
+  onDiamondMenu,
   onLabelClick,
-  onLabelContext,
+  onLabelMenu,
+  onLaneMenu,
   onSpanDown,
   onSpanMove,
   onSpanUp,
@@ -132,9 +135,10 @@ const TrackRow = memo(function TrackRow({
   onDiamondDown: (e: React.PointerEvent, track: string, id: number, isHipsPos: boolean) => void;
   onDiamondMove: (e: React.PointerEvent) => void;
   onDiamondUp: () => void;
-  onDiamondDelete: (track: string, id: number) => void;
+  onDiamondMenu: (e: React.MouseEvent, track: string, id: number) => void;
   onLabelClick: (e: React.MouseEvent, track: string) => void;
-  onLabelContext: (e: React.MouseEvent, track: string) => void;
+  onLabelMenu: (e: React.MouseEvent, track: string) => void;
+  onLaneMenu: (e: React.MouseEvent, track: string) => void;
   onSpanDown: (e: React.PointerEvent, track: string, isHipsPos: boolean) => void;
   onSpanMove: (e: React.PointerEvent) => void;
   onSpanUp: () => void;
@@ -178,14 +182,14 @@ const TrackRow = memo(function TrackRow({
             ? `All ${keys.length} keys across every track — click the lane to scrub · Alt+drag: select a time band across all tracks`
             : row.isExpr
               ? dense
-                ? `Expression "${row.label}" — ${keys.length} keys (showing a sampled subset)\nDrag on the lane: box-select keys · Alt+drag the bar: move the whole track in time\nRight-click the label: remove the whole track`
-                : `Expression "${row.label}"\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+click keys: multi-select\nAlt+drag the bar: move the whole track in time\nRight-click the label: remove the whole track`
+                ? `Expression "${row.label}" — ${keys.length} keys (showing a sampled subset)\nDrag on the lane: box-select keys · Alt+drag the bar: move the whole track in time\nRight-click the lane or a key: menu (select / copy / paste / remove)`
+                : `Expression "${row.label}"\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+click keys: multi-select\nAlt+drag the bar: move the whole track in time\nRight-click the lane or a key: menu (select / copy / paste / remove)`
               : dense
-                ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click: remove all its keys`
-                : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click: remove all its keys`
+                ? `${row.label} — ${keys.length} keys (showing a sampled subset)\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click the lane or a key: menu (select / copy / paste / remove) · Esc: clear key selection`
+                : `${row.track}\nClick: select bone · Ctrl/Cmd+click: multi-select · Shift+click: range\nDrag on the lane: box-select keys (like files in Explorer) · Ctrl/Cmd+drag: add to selection · Alt+drag: time band across all tracks\nAlt+drag the track's bar: move the whole track in time (selected tracks move together)\nRight-click the lane or a key: menu (select / copy / paste / remove) · Esc: clear key selection`
         }
         onClick={passive ? undefined : (e) => onLabelClick(e, row.track)}
-        onContextMenu={passive ? undefined : (e) => onLabelContext(e, row.track)}
+        onContextMenu={passive ? undefined : (e) => onLabelMenu(e, row.track)}
       >
         {row.label}
         {dense && <span className="dense-count"> · {keys.length}</span>}
@@ -197,7 +201,7 @@ const TrackRow = memo(function TrackRow({
         onPointerDown={onScrubDown}
         onPointerMove={onScrubMove}
         onPointerUp={onScrubUp}
-        onContextMenu={(e) => e.preventDefault()}
+        onContextMenu={passive ? (e) => e.preventDefault() : (e) => onLaneMenu(e, row.track)}
       >
         <div className="lane" />
         {spanW >= 3 && (
@@ -214,7 +218,7 @@ const TrackRow = memo(function TrackRow({
             onPointerDown={passive ? undefined : (e) => onSpanDown(e, row.track, row.isHipsPos)}
             onPointerMove={passive ? undefined : onSpanMove}
             onPointerUp={passive ? undefined : onSpanUp}
-            onContextMenu={(e) => e.preventDefault()}
+            onContextMenu={passive ? (e) => e.preventDefault() : (e) => onLaneMenu(e, row.track)}
           />
         )}
         {shown.map((k, i) => {
@@ -227,18 +231,14 @@ const TrackRow = memo(function TrackRow({
               key={passive ? i : k.id}
               className={`diamond${passive ? ' ghost' : ''}${easeClass}${selected ? ' selected' : ''}`}
               style={{ left: k.t * pps }}
-              title={`${k.t.toFixed(2)}s${weight}${dense ? ` · 1 of ${keys.length} keys` : !row.isExpr && k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — Alt+click: select all keys at this time · Ctrl/Cmd+click: add to selection · drag to move · right-click: delete'}`}
+              title={`${k.t.toFixed(2)}s${weight}${dense ? ` · 1 of ${keys.length} keys` : !row.isExpr && k.ease && k.ease !== 'linear' ? ` · ${k.ease}` : ''}${passive ? '' : ' — Alt+click: select all keys at this time · Ctrl/Cmd+click: add to selection · drag to move · right-click: menu'}`}
               onPointerDown={passive ? undefined : (e) => onDiamondDown(e, row.track, k.id, row.isHipsPos)}
               onPointerMove={passive ? undefined : onDiamondMove}
               onPointerUp={passive ? undefined : onDiamondUp}
               onContextMenu={
                 passive
                   ? undefined
-                  : (e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onDiamondDelete(row.track, k.id);
-                    }
+                  : (e) => onDiamondMenu(e, row.track, k.id)
               }
             />
           );
@@ -262,6 +262,7 @@ export function Timeline() {
   const selectedKeys = useEditor((s) => s.selectedKeys);
   const selectedBones = useEditor((s) => s.selectedBones);
   const hasClipboard = useEditor((s) => s.keyClipboard != null);
+  const clipCount = useEditor((s) => s.keyClipboard?.reduce((n, t) => n + t.keys.length, 0) ?? 0);
   const timelineH = useEditor((s) => s.timelineH);
   const st = useEditor;
 
@@ -528,11 +529,31 @@ export function Timeline() {
         dragSelectRef.current = null;
         setRectSelect(null);
         if (!g.active) {
-          // Plain click on empty lane: scrub + clear the selection.
+          // Plain click on empty lane: scrub. The key selection survives —
+          // one mis-click must not wipe a selection built across many rows
+          // (Esc clears it deliberately).
           const s = st.getState();
           s.setTime(s.snapTime(timeFromEvent(e.clientX)));
-          s.clearKeySelection();
+          return;
         }
+        // Recompute the selection from the up position: pointer streams can
+        // coalesce away the final move, and the selection must match the
+        // rectangle the user actually released on.
+        const s = st.getState();
+        const minX = Math.min(g.x0, e.clientX);
+        const maxX = Math.max(g.x0, e.clientX);
+        const minY = Math.min(g.y0, e.clientY);
+        const maxY = Math.max(g.y0, e.clientY);
+        const refs: { track: string; id: number }[] = [];
+        for (const lane of g.lanes) {
+          if (lane.bottom < minY || lane.top > maxY) continue;
+          const keys = trackKeys(s, lane.track);
+          for (const k of keys ?? []) {
+            const kx = lane.left + k.t * ppsRef.current;
+            if (kx >= minX - 5 && kx <= maxX + 5) refs.push({ track: lane.track, id: k.id });
+          }
+        }
+        s.selectKeys(refs, g.additive ? 'add' : 'replace');
         return;
       }
       const band = marqueeRef.current;
@@ -621,18 +642,114 @@ export function Timeline() {
   const onDiamondUp = useCallback(() => {
     dragRef.current = null;
   }, []);
-  const onDiamondDelete = useCallback(
-    (track: string, id: number) => {
+
+  // Right-click opens a context menu instead of destroying data: a right-click
+  // on a key used to delete it on the spot, and one on a row label wiped the
+  // whole track's animation. Now every destructive action lives behind an
+  // explicit menu item, and copy/paste/select become discoverable.
+  interface MenuState {
+    x: number;
+    y: number;
+    kind: 'key' | 'label' | 'lane' | 'ruler';
+    track: string;
+    /** Key id for 'key' menus. */
+    id?: number;
+    /** Time under the cursor (lane / ruler / key menus). */
+    time: number;
+  }
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  const openMenuAt = useCallback((e: React.MouseEvent, m: Omit<MenuState, 'x' | 'y'>) => {
+    setMenu({ ...m, x: e.clientX, y: e.clientY });
+  }, []);
+
+  // Key menu: right-clicking an unselected key selects it first, so the menu
+  // operates on it; a key inside the multi-selection keeps that selection.
+  const onDiamondMenu = useCallback(
+    (e: React.MouseEvent, track: string, id: number) => {
+      e.preventDefault();
+      e.stopPropagation();
       const s = st.getState();
-      s.selectKey(track, id);
-      s.deleteSelectedKey();
+      const key = trackKeys(s, track)?.find((k) => k.id === id);
+      const inKeySel = s.selectedKeys.some((r) => r.track === track && r.id === id);
+      if (!inKeySel) s.selectKey(track, id);
+      openMenuAt(e, { kind: 'key', track, id, time: key?.t ?? s.time });
     },
-    [st],
+    [st, openMenuAt],
   );
 
+  const onLabelMenu = useCallback(
+    (e: React.MouseEvent, track: string) => {
+      e.preventDefault();
+      openMenuAt(e, { kind: 'label', track, time: 0 });
+    },
+    [openMenuAt],
+  );
+
+  const onLaneMenu = useCallback(
+    (e: React.MouseEvent, track: string) => {
+      e.preventDefault();
+      openMenuAt(e, { kind: 'lane', track, time: Math.max(0, timeFromEvent(e.clientX)) });
+    },
+    [openMenuAt, timeFromEvent],
+  );
+
+  const onRulerMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      openMenuAt(e, { kind: 'ruler', track: '', time: Math.max(0, timeFromEvent(e.clientX)) });
+    },
+    [openMenuAt, timeFromEvent],
+  );
+
+  // Close the menu on any click outside it, Escape, scroll, or resize.
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: PointerEvent) => {
+      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+      setMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // Swallow this Escape so the app-wide handler doesn't also clear the
+        // key selection — Esc with a menu open dismisses just the menu.
+        e.stopPropagation();
+        setMenu(null);
+      }
+    };
+    const close = () => setMenu(null);
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', close);
+    const scroller = scrollRef.current;
+    scroller?.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', close);
+      scroller?.removeEventListener('scroll', close, true);
+    };
+  }, [menu]);
+
+  // Keep the menu on screen once measured.
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el || !menu) return;
+    const r = el.getBoundingClientRect();
+    let { x, y } = menu;
+    if (r.right > window.innerWidth - 8) x = window.innerWidth - 8 - r.width;
+    if (r.bottom > window.innerHeight - 8) y = window.innerHeight - 8 - r.height;
+    if (x !== menu.x || y !== menu.y) setMenu({ ...menu, x, y });
+  });
+
   // Row label = the bone of that track. Click selects the bone (with the
-  // same modifiers as the bone tree); right-click removes its whole track.
-  // Expression tracks have no bone — clicking their label does nothing.
+  // same modifiers as the bone tree); right-click opens the track menu
+  // (select / copy / paste / remove — nothing destructive happens on the
+  // click itself). Expression tracks have no bone — clicking their label
+  // does nothing.
   const onLabelClick = useCallback(
     (e: React.MouseEvent, track: string) => {
       if (isExprTrack(track)) return;
@@ -641,13 +758,6 @@ export function Timeline() {
       if (e.shiftKey) s.selectBoneRange(bone);
       else if (e.ctrlKey || e.metaKey) s.toggleBoneSelection(bone);
       else s.selectBone(bone);
-    },
-    [st],
-  );
-  const onLabelContext = useCallback(
-    (e: React.MouseEvent, track: string) => {
-      e.preventDefault();
-      st.getState().deleteBoneKeys(track);
     },
     [st],
   );
@@ -736,6 +846,60 @@ export function Timeline() {
 
   const hasKeys = rows.length > 0;
 
+  // Menu contents, resolved from what was right-clicked. Labels and counts
+  // reflect the state at open time; actions re-read the store when clicked.
+  const menuTrack = menu && menu.kind !== 'ruler' ? rows.find((r) => r.track === menu.track) : undefined;
+  const menuLabel = menuTrack?.label ?? menu?.track ?? '';
+  const keysWord = (n: number) => `key${n === 1 ? '' : 's'}`;
+  const menuSelCount = selectedKeys.length > 0 ? selectedKeys.length : selectedKey ? 1 : 0;
+  const menuItems: MenuItem[] = [];
+  if (menu?.kind === 'key') {
+    const n = Math.max(1, menuSelCount);
+    menuItems.push(
+      { label: `Copy ${n} ${keysWord(n)}`, run: () => st.getState().copySelectedKeys() },
+      { label: `Cut ${n} ${keysWord(n)}`, run: () => st.getState().cutSelectedKeys() },
+      clipCount > 0
+        ? {
+            label: `Paste ${clipCount} ${keysWord(clipCount)} at ${menu.time.toFixed(2)}s`,
+            run: () => st.getState().pasteKeys(menu.time),
+          }
+        : { label: 'Paste — clipboard is empty', disabled: true },
+      'sep',
+      {
+        label: `Select all keys at ${menu.time.toFixed(2)}s`,
+        run: () => st.getState().selectKeysInRange(menu.time, menu.time),
+      },
+      'sep',
+      { label: `Delete ${n} ${keysWord(n)}`, danger: true, run: () => st.getState().deleteSelectedKey() },
+    );
+  } else if (menu && (menu.kind === 'label' || menu.kind === 'lane')) {
+    const n = menuTrack?.keys.length ?? 0;
+    menuItems.push(
+      { label: `Select all keys of ${menuLabel}`, run: () => st.getState().selectTrackKeys(menu.track) },
+      { label: `Copy all keys of ${menuLabel}`, run: () => st.getState().copyTrackKeys(menu.track) },
+      clipCount > 0
+        ? {
+            label:
+              menu.kind === 'lane'
+                ? `Paste ${clipCount} ${keysWord(clipCount)} at ${menu.time.toFixed(2)}s`
+                : `Paste ${clipCount} ${keysWord(clipCount)} into ${menuLabel} at the playhead`,
+            run: () => st.getState().pasteKeys(menu.kind === 'lane' ? menu.time : undefined),
+          }
+        : { label: 'Paste — clipboard is empty', disabled: true },
+      'sep',
+      { label: `Remove all keys of ${menuLabel}`, danger: true, run: () => st.getState().deleteBoneKeys(menu.track) },
+    );
+  } else if (menu?.kind === 'ruler') {
+    menuItems.push(
+      clipCount > 0
+        ? {
+            label: `Paste ${clipCount} ${keysWord(clipCount)} at ${menu.time.toFixed(2)}s`,
+            run: () => st.getState().pasteKeys(menu.time),
+          }
+        : { label: 'Paste — clipboard is empty', disabled: true },
+    );
+  }
+
   return (
     <div className="timeline" style={{ height: timelineH }}>
       <div
@@ -816,7 +980,11 @@ export function Timeline() {
         </button>
         <button
           className="btn icon"
-          title="Paste keyframes at the playhead (Ctrl/Cmd+V)"
+          title={
+            hasClipboard
+              ? `Paste ${clipCount} key${clipCount === 1 ? '' : 's'} at the playhead (Ctrl/Cmd+V)`
+              : 'Paste keyframes at the playhead (Ctrl/Cmd+V)'
+          }
           disabled={!hasClipboard}
           onClick={() => st.getState().pasteKeys()}
         >
@@ -824,7 +992,7 @@ export function Timeline() {
         </button>
         <button
           className="btn icon danger"
-          title="Delete selected keyframe (Del)"
+          title="Delete selected keyframes (Del)"
           onClick={() => st.getState().deleteSelectedKey()}
         >
           <Trash2 size={15} />
@@ -900,6 +1068,7 @@ export function Timeline() {
               onPointerDown={onScrubDown}
               onPointerMove={onScrubMove}
               onPointerUp={onScrubUp}
+              onContextMenu={onRulerMenu}
             >
               {rulerTicks.map((tick, i) => (
                 <div key={i} className={`tick ${tick.label ? 'major' : ''}`} style={{ left: tick.t * pps }}>
@@ -925,9 +1094,10 @@ export function Timeline() {
               onDiamondDown={onDiamondDown}
               onDiamondMove={onDiamondMove}
               onDiamondUp={onDiamondUp}
-              onDiamondDelete={onDiamondDelete}
+              onDiamondMenu={onDiamondMenu}
               onLabelClick={onLabelClick}
-              onLabelContext={onLabelContext}
+              onLabelMenu={onLabelMenu}
+              onLaneMenu={onLaneMenu}
               onSpanDown={onSpanDown}
               onSpanMove={onSpanMove}
               onSpanUp={onSpanUp}
@@ -954,9 +1124,10 @@ export function Timeline() {
               onDiamondDown={onDiamondDown}
               onDiamondMove={onDiamondMove}
               onDiamondUp={onDiamondUp}
-              onDiamondDelete={onDiamondDelete}
+              onDiamondMenu={onDiamondMenu}
               onLabelClick={onLabelClick}
-              onLabelContext={onLabelContext}
+              onLabelMenu={onLabelMenu}
+              onLaneMenu={onLaneMenu}
               onSpanDown={onSpanDown}
               onSpanMove={onSpanMove}
               onSpanUp={onSpanUp}
@@ -1006,6 +1177,37 @@ export function Timeline() {
           </div>
         </div>
       </div>
+
+      {/* Right-click menu — select / copy / paste / remove per target. Every
+          destructive action lives behind an explicit item; nothing is
+          destroyed by the click that opens the menu. */}
+      {menu && menuItems.length > 0 && (
+        <div
+          className="tl-menu"
+          ref={menuRef}
+          style={{ left: menu.x, top: menu.y }}
+          role="menu"
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {menuItems.map((it, i) =>
+            it === 'sep' ? (
+              <div key={i} className="tl-menu-sep" />
+            ) : (
+              <button
+                key={i}
+                className={`tl-menu-item${it.danger ? ' danger' : ''}`}
+                disabled={it.disabled}
+                onClick={() => {
+                  closeMenu();
+                  it.run?.();
+                }}
+              >
+                {it.label}
+              </button>
+            ),
+          )}
+        </div>
+      )}
     </div>
   );
 }

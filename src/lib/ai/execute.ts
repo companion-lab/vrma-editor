@@ -22,6 +22,7 @@ import {
 } from '../vrmedit/live';
 import { applyAssetVisibilityAll, collectParts, collectWholeMeshes } from '../vrmedit/parts';
 import { PROPORTION_MAX, PROPORTION_MIN } from '../vrmedit/proportions';
+import { getDonor, loadDonor, WEARABLE_CATEGORIES, type DonorSource } from '../wardrobe/sources';
 import { BONE_ORDER, BONE_PARENTS } from '../humanoid';
 import { getViewport } from './sceneRef';
 
@@ -205,6 +206,84 @@ async function toolListModels() {
 function toolListOutfits() {
   const st = useEditor.getState();
   return { outfits: st.outfitsFor().presets };
+}
+
+// --- Wardrobe (wear donor parts) ---
+
+/** Resolve a donor by name: already-loaded donors are returned as-is; otherwise
+ *  the wardrobe library (assets/wardrobe) is fetched and matched case-insensitively. */
+async function ensureDonor(name: string): Promise<DonorSource> {
+  const cached = getDonor(name);
+  if (cached) return cached;
+  await useEditor.getState().fetchWardrobeLibrary();
+  const lib = useEditor.getState().wardrobeLibrary;
+  const entry =
+    lib.find((d) => d.name === name) ?? lib.find((d) => d.name.toLowerCase() === name.toLowerCase());
+  if (!entry) {
+    throw new ToolError(
+      `Donor "${name}" is not loaded and not in the wardrobe library (assets/wardrobe). Available: ${
+        lib.map((d) => d.name).join(', ') || '(none)'
+      }`,
+    );
+  }
+  return loadDonor(entry.name, entry.url);
+}
+
+async function toolListWardrobe() {
+  await useEditor.getState().fetchWardrobeLibrary();
+  const lib = useEditor.getState().wardrobeLibrary;
+  const donors = await Promise.all(
+    lib.map(async (d) => {
+      try {
+        const donor = await ensureDonor(d.name);
+        return {
+          name: donor.name,
+          parts: donor.parts
+            .filter((p) => WEARABLE_CATEGORIES.includes(p.category))
+            .map((p) => ({ id: p.id, label: p.label, category: p.category })),
+        };
+      } catch (err) {
+        return { name: d.name, error: (err as Error).message };
+      }
+    }),
+  );
+  const worn = useEditor.getState().worn.map((w) => ({ donor: w.donor, id: w.id, category: w.category }));
+  return { donors, worn };
+}
+
+async function toolWearItem(args: { donor?: unknown; id?: unknown }) {
+  const donorName = typeof args.donor === 'string' ? args.donor : '';
+  const id = typeof args.id === 'string' ? args.id : '';
+  if (!donorName || !id) throw new ToolError('donor and id are required (see list_wardrobe)');
+  requireVrm();
+  const donor = await ensureDonor(donorName);
+  const part = donor.parts.find((p) => p.id === id);
+  if (!part) {
+    throw new ToolError(`Donor "${donor.name}" has no part "${id}". Call list_wardrobe for valid ids.`);
+  }
+  useEditor.getState().wearPart(donor.name, part.id, part.category);
+  const st = useEditor.getState();
+  const entry = st.worn.find((w) => w.donor === donor.name && w.id === part.id);
+  return {
+    worn: donor.name,
+    id: part.id,
+    category: part.category,
+    autoHidden: { meshes: entry?.replacedMeshes ?? [], parts: entry?.replacedParts ?? [] },
+    wornCount: st.worn.length,
+  };
+}
+
+async function toolUnwearItem(args: { donor?: unknown; id?: unknown }) {
+  const donorName = typeof args.donor === 'string' ? args.donor : '';
+  const id = typeof args.id === 'string' ? args.id : '';
+  if (!donorName || !id) throw new ToolError('donor and id are required (see list_wardrobe)');
+  requireVrm();
+  const st = useEditor.getState();
+  if (!st.worn.some((w) => w.donor === donorName && w.id === id)) {
+    throw new ToolError(`"${id}" from "${donorName}" is not currently worn. Call list_wardrobe.`);
+  }
+  st.unwearPart(donorName, id);
+  return { removed: { donor: donorName, id }, wornCount: useEditor.getState().worn.length };
 }
 
 function toolGetAnimation(): VrmaData {
@@ -600,7 +679,7 @@ function toolSetBoneScale(args: { bone?: unknown; factor?: unknown }) {
   const factor = args.factor;
   const st = useEditor.getState();
   st.setBoneScale(bone, factor);
-  applyAllBoneScales(vrm, useEditor.getState().modelEdits.boneScale);
+  applyAllBoneScales(vrm, useEditor.getState().modelEdits.boneScale, useEditor.getState().modelEdits.bodyShape);
   return { bone, factor };
 }
 
@@ -841,6 +920,9 @@ const IMPLS: Record<string, ToolImpl> = {
   list_expressions: () => toolListExpressions(),
   list_models: () => toolListModels(),
   list_outfits: () => toolListOutfits(),
+  list_wardrobe: () => toolListWardrobe(),
+  wear_item: (a) => toolWearItem(a as never),
+  unwear_item: (a) => toolUnwearItem(a as never),
   get_animation: () => toolGetAnimation(),
   set_animation: (a) => toolSetAnimation(a as never),
   new_animation: (a) => toolNewAnimation(a as never),
