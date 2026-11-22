@@ -88,8 +88,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
             </button>
           </div>
           <div className="muted small">
-            Calls go straight from this browser to the endpoint. For Ollama, start with
-            OLLAMA_ORIGINS="*" so the browser may call it.
+            Remote endpoints are relayed through the site's /api/chat proxy, so no CORS setup is
+            needed. Local endpoints (Ollama/LM Studio) are called straight from the browser — start
+            Ollama with OLLAMA_ORIGINS="*" so the browser may call it.
           </div>
         </div>
       </div>

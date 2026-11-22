@@ -130,10 +130,63 @@ function aiBridge(): Plugin {
   };
 }
 
+// Dev counterpart of api/chat.ts (the Vercel serverless function): relays
+// OpenAI-compatible chat completions to the endpoint named in the x-ai-url
+// header, so remote providers (no browser CORS) work in dev exactly like in
+// the deployed build. Local endpoints (Ollama/LM Studio) bypass it entirely.
+function aiChatProxy(): Plugin {
+  return {
+    name: 'ai-chat-proxy',
+    configureServer(server) {
+      server.middlewares.use('/api/chat', (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.end(JSON.stringify({ error: 'POST only' }));
+          return;
+        }
+        let url: URL;
+        try {
+          url = new URL(String(req.headers['x-ai-url'] ?? ''));
+        } catch {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'Missing or invalid x-ai-url header' }));
+          return;
+        }
+        if (url.protocol !== 'https:') {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'x-ai-url must be https' }));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(Buffer.from(c)));
+        req.on('end', async () => {
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          const auth = req.headers.authorization;
+          if (typeof auth === 'string' && auth) headers.Authorization = auth;
+          try {
+            const upstream = await fetch(url, {
+              method: 'POST',
+              headers,
+              body: Buffer.concat(chunks).toString('utf8') || '{}',
+            });
+            res.statusCode = upstream.status;
+            const ct = upstream.headers.get('content-type');
+            if (ct) res.setHeader('Content-Type', ct);
+            res.end(Buffer.from(await upstream.arrayBuffer()));
+          } catch (err) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: `Upstream request failed: ${(err as Error).message}` }));
+          }
+        });
+      });
+    },
+  };
+}
+
 // `assets/` (which contains demo.glb) is served as the public dir,
 // so the demo model is reachable at /demo.glb without duplicating it.
 export default defineConfig({
-  plugins: [react(), listAssets(), aiBridge()],
+  plugins: [react(), listAssets(), aiChatProxy(), aiBridge()],
   publicDir: 'assets',
   server: {
     port: 5173,

@@ -1,7 +1,9 @@
 // LLM provider client: OpenAI-compatible chat completions with tool calling.
 // Works with OpenAI, GLM/Z.ai, OpenRouter, Ollama/LM Studio (local) and any
-// other /v1/chat/completions endpoint. The API key is stored in localStorage —
-// this is a local personal tool, so calls go straight from the browser.
+// other /v1/chat/completions endpoint. The API key is stored in localStorage.
+// Remote endpoints are relayed through the same-origin /api/chat Vercel
+// function (they don't allow browser CORS calls); local endpoints are called
+// straight from the browser.
 
 import { TOOL_DEFS } from './toolDefs';
 
@@ -128,29 +130,47 @@ export async function chatCompletion(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = `Bearer ${s.apiKey}`;
 
+  const body = JSON.stringify({
+    model: s.model,
+    messages,
+    tools: OPENAI_TOOLS,
+    tool_choice: 'auto',
+    temperature: 0.4,
+  });
+
+  // Remote providers block browser CORS calls, so relay through the
+  // same-origin /api/chat proxy (Vercel function in prod, matching dev-server
+  // middleware in dev). Local endpoints (Ollama/LM Studio) are only reachable
+  // from the user's machine anyway, so those go direct from the browser.
+  const local = isLikelyLocal(s.baseUrl);
+  const proxied = !local;
+  const url = proxied ? '/api/chat' : endpoint(s.baseUrl);
+  const requestHeaders = proxied ? { ...headers, 'x-ai-url': endpoint(s.baseUrl) } : headers;
+
   let res: Response;
   try {
-    res = await fetch(endpoint(s.baseUrl), {
+    res = await fetch(url, {
       method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: s.model,
-        messages,
-        tools: OPENAI_TOOLS,
-        tool_choice: 'auto',
-        temperature: 0.4,
-      }),
+      headers: requestHeaders,
+      body,
       signal: opts.signal,
     });
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
     throw new Error(
-      `Could not reach ${s.baseUrl} (${(err as Error).message}). Check the endpoint and that it allows browser (CORS) requests.`,
+      `Could not reach ${s.baseUrl} (${(err as Error).message}). Check the endpoint${proxied ? '' : ' and that it allows browser (CORS) requests'}.`,
     );
   }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    // On a static deploy without the function, /api/chat 404s with a
+    // non-JSON body — say so instead of blaming the provider.
+    if (proxied && !/^\s*[[{]/.test(text)) {
+      throw new Error(
+        `/api/chat proxy unavailable (HTTP ${res.status}) — this needs the Vercel serverless deploy, or use a local endpoint.`,
+      );
+    }
     throw new Error(`AI endpoint returned HTTP ${res.status}: ${text.slice(0, 600) || res.statusText}`);
   }
 
