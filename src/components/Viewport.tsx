@@ -155,7 +155,8 @@ export function Viewport() {
 
     // --- click-to-select on skeleton joints ---
     // A clean (non-drag) left click raycasts the joint spheres; shift/ctrl
-    // adds to the multi-selection, like the bone tree.
+    // adds to the multi-selection, like the bone tree. A clean click on
+    // empty space (or the model surface) deselects, dropping the gizmo.
     let downX = 0;
     let downY = 0;
     let downLeft = false;
@@ -189,9 +190,12 @@ export function Viewport() {
       }
       const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      const bone = overlay.raycast(ndcX, ndcY, camera);
-      if (!bone) return;
       const st = useEditor.getState();
+      const bone = overlay.raycast(ndcX, ndcY, camera);
+      if (!bone) {
+        if (!e.shiftKey && !e.ctrlKey && !e.metaKey) st.selectBone(null);
+        return;
+      }
       if (e.shiftKey || e.ctrlKey || e.metaKey) st.toggleBoneSelection(bone);
       else st.selectBone(bone);
     };
