@@ -11,6 +11,7 @@ import { SkeletonOverlay, setSkeletonTheme } from '../lib/skeleton';
 import { parseGlb } from '../lib/vrmedit/glb';
 import { bakedExpressionsFromJson, metaFieldsFor } from '../lib/vrmedit/exportModel';
 import { applyAllEdits, applyHipsLift, collapseOutlineMaterialGroups, collectMaterials, hipsLiftOffset, snapshotMaterials, stripOutlineSuffix, syncMToonUniforms } from '../lib/vrmedit/live';
+import { paintModeActive, disposeAllPaintSessions } from '../lib/vrmedit/paint';
 import { registerPartAssociations } from '../lib/vrmedit/parts';
 import { updateWornParts, captureTargetRestWorlds, wardrobeGroup } from '../lib/wardrobe/wear';
 import { registerViewport } from '../lib/ai/sceneRef';
@@ -93,7 +94,7 @@ export function Viewport() {
 
     const clock = new THREE.Clock();
     sceneRef.current = { scene, camera, renderer, orbit, gizmo, gizmoHelper, vrmRoot, grid, clock, overlay };
-    registerViewport({ renderer, scene, camera }); // for AI tools (screenshot)
+    registerViewport({ renderer, scene, camera, orbit }); // for AI tools + paint mode
     if (import.meta.env.DEV) {
       (window as any).__vp = { scene, camera, renderer, vrmRoot, grid, overlay, store: useEditor };
     }
@@ -164,6 +165,7 @@ export function Viewport() {
     };
     gizmo.addEventListener('dragging-changed', markGizmoDrag);
     const onPointerDown = (e: PointerEvent) => {
+      if (paintModeActive()) return; // paint mode owns left-drag on the model
       downLeft = e.button === 0;
       gizmoDragged = false;
       downX = e.clientX;
@@ -172,6 +174,7 @@ export function Viewport() {
     const onPointerUp = (e: PointerEvent) => {
       if (!downLeft || e.button !== 0) return;
       downLeft = false;
+      if (paintModeActive()) return;
       if (gizmoDragged) return; // the click finished a gizmo drag
       if (Math.hypot(e.clientX - downX, e.clientY - downY) > 5) return;
       const el = renderer.domElement;
@@ -332,6 +335,8 @@ export function Viewport() {
       // in sync (live.ts).
       collapseOutlineMaterialGroups(vrm);
       syncMToonUniforms(vrm);
+      // Paint sessions hold canvas textures bound to the previous model.
+      disposeAllPaintSessions();
 
       refs.vrmRoot.clear();
       refs.vrmRoot.add(vrm.scene);

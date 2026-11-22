@@ -1438,6 +1438,14 @@ input[type='range']::-moz-range-thumb {
   height: 26px;
 }
 
+.tex-thumb-btn {
+  cursor: pointer;
+}
+
+.tex-thumb-btn:hover {
+  border-color: var(--accent);
+}
+
 .tex-picker {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1889,4 +1897,129 @@ input[type='range']::-moz-range-thumb {
 
 .spin {
   animation: motion-spin 0.9s linear infinite;
+}
+
+/* ---------- texture painter ---------- */
+
+.painter-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.painter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(860px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  box-shadow: 0 12px 40px var(--shadow-color);
+}
+
+/* "Paint on model" mode: the dialog collapses to a floating tool bar and the
+   viewport takes pointer events (drag on the model to paint). */
+.painter-overlay.painter-mini {
+  background: none;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.painter-overlay.painter-mini .painter-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: auto;
+  max-width: calc(100vw - 48px);
+  max-height: none;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.painter-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.painter-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.painter-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.painter-tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.painter-tool input[type='color'] {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  cursor: pointer;
+}
+
+.painter-tool input[type='range'] {
+  width: 90px;
+}
+
+.painter-tool-val {
+  min-width: 34px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.painter-zoom-pct {
+  min-width: 52px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.painter-canvas-wrap {
+  height: 56vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* checkerboard so transparent regions read as transparent */
+  background-image:
+    linear-gradient(45deg, rgba(128, 128, 128, 0.18) 25%, transparent 25%, transparent 75%, rgba(128, 128, 128, 0.18) 75%),
+    linear-gradient(45deg, rgba(128, 128, 128, 0.18) 25%, transparent 25%, transparent 75%, rgba(128, 128, 128, 0.18) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+
+.painter-canvas {
+  display: block;
+  touch-action: none;
+}
+
+.painter-foot {
+  font-size: 11px;
 }

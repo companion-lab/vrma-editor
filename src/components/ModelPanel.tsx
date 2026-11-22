@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { ChevronDown, ChevronRight, Eye, EyeOff, FolderOpen, Image as ImageIcon, Plus, RotateCcw, Shirt, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, EyeOff, FolderOpen, Image as ImageIcon, Paintbrush, Plus, RotateCcw, Shirt, X } from 'lucide-react';
 import { useEditor, type ModelEdits, type OutfitPreset } from '../store';
 import { getDonor, loadDonor, WEARABLE_CATEGORIES, type DonorSource } from '../lib/wardrobe/sources';
 import {
@@ -29,6 +29,7 @@ import {
   classifyAsset,
   type AssetPart,
 } from '../lib/vrmedit/parts';
+import { TexturePainter } from './TexturePainter';
 import {
   BODY_SHAPE_MAX,
   BODY_SHAPE_MIN,
@@ -93,7 +94,7 @@ function readAlphaMode(m: THREE.Material | undefined): AlphaMode {
   return 'OPAQUE';
 }
 
-function MaterialRow({ name, edits }: { name: string; edits: ModelEdits }) {
+function MaterialRow({ name, edits, onPaint }: { name: string; edits: ModelEdits; onPaint: (name: string) => void }) {
   const vrm = useEditor((s) => s.vrm);
   const textureLibrary = useEditor((s) => s.textureLibrary);
   const [open, setOpen] = useState(false);
@@ -244,7 +245,16 @@ function MaterialRow({ name, edits }: { name: string; edits: ModelEdits }) {
           </label>
           <div className="ctl-row texture-row">
             <span>Texture</span>
-            {thumb && <img className="tex-thumb" src={thumb} alt="" draggable={false} />}
+            {thumb && (
+              <img
+                className="tex-thumb tex-thumb-btn"
+                src={thumb}
+                alt=""
+                draggable={false}
+                title="Open texture painter"
+                onClick={() => onPaint(name)}
+              />
+            )}
             <span className="tex-name" title={edit?.textureName ?? ''}>
               {textureBusy ? 'loading…' : (edit?.textureName ?? 'model texture')}
             </span>
@@ -255,6 +265,9 @@ function MaterialRow({ name, edits }: { name: string; edits: ModelEdits }) {
             </button>
             <button className="btn small" onClick={() => textureInputRef.current?.click()}>
               <FolderOpen size={12} /> File…
+            </button>
+            <button className="btn small" onClick={() => onPaint(name)} title="Paint this texture manually">
+              <Paintbrush size={12} /> Paint
             </button>
             <input
               ref={textureInputRef}
@@ -302,7 +315,7 @@ function MaterialRow({ name, edits }: { name: string; edits: ModelEdits }) {
   );
 }
 
-function MaterialsSection({ edits }: { edits: ModelEdits }) {
+function MaterialsSection({ edits, onPaint }: { edits: ModelEdits; onPaint: (name: string) => void }) {
   const vrm = useEditor((s) => s.vrm);
   const names = useMemo(() => {
     if (!vrm) return [];
@@ -317,7 +330,7 @@ function MaterialsSection({ edits }: { edits: ModelEdits }) {
   return (
     <>
       {names.map((n) => (
-        <MaterialRow key={n} name={n} edits={edits} />
+        <MaterialRow key={n} name={n} edits={edits} onPaint={onPaint} />
       ))}
     </>
   );
@@ -1086,6 +1099,7 @@ export function ModelPanel() {
   const vrm = useEditor((s) => s.vrm);
   const edits = useEditor((s) => s.modelEdits);
   const modelName = useEditor((s) => s.modelName);
+  const [painting, setPainting] = useState<string | null>(null);
 
   if (!vrm) return <div className="panel-body"><div className="muted pad">Load a model first.</div></div>;
 
@@ -1099,7 +1113,7 @@ export function ModelPanel() {
         <WardrobeSection />
       </Section>
       <Section title="Materials">
-        <MaterialsSection edits={edits} />
+        <MaterialsSection edits={edits} onPaint={setPainting} />
       </Section>
       <Section title="Assets">
         <AssetsSection edits={edits} />
@@ -1122,6 +1136,7 @@ export function ModelPanel() {
       <Section title="Proportions">
         <ProportionsSection edits={edits} />
       </Section>
+      {painting && <TexturePainter matName={painting} onClose={() => setPainting(null)} />}
     </div>
   );
 }

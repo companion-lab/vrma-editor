@@ -159,6 +159,40 @@ export function applyMaterialEdit(vrm: VRM, matName: string, edit: MaterialEdit)
   }
 }
 
+// Tracks which File produced each live texture so undo/redo can tell texture
+// versions apart even when they share a display name (e.g. repeated paint
+// commits of the same material). Original (unreplaced) textures have no entry.
+const TEX_SOURCE = new WeakMap<Texture, File>();
+
+/** Remember that `tex` was produced from `file` (paint sessions call this per commit). */
+export function setTextureSource(tex: Texture, file: File): void {
+  TEX_SOURCE.set(tex, file);
+}
+
+/** Drop the source record (e.g. the canvas was reverted to the original image). */
+export function clearTextureSource(tex: Texture): void {
+  TEX_SOURCE.delete(tex);
+}
+
+/**
+ * True when the material's live base texture was produced from `file`
+ * (undefined = original/unreplaced, also when the material has no map at all).
+ */
+export function textureSourceMatches(vrm: VRM, matName: string, file: File | undefined): boolean {
+  const map = materialsFor(vrm, matName)[0] as MapMat | undefined;
+  if (!map) return false;
+  if (!map.map) return file === undefined;
+  return TEX_SOURCE.get(map.map) === file;
+}
+
+/** Assign an already-built texture (e.g. the paint session's CanvasTexture) as the base color texture. */
+export function applyLiveTexture(vrm: VRM, matName: string, tex: Texture): void {
+  for (const m of materialsFor(vrm, matName)) {
+    (m as MapMat).map = tex;
+    m.needsUpdate = true;
+  }
+}
+
 /** Load an image file as a texture and swap it in as the base color texture. */
 export async function applyTextureReplacement(vrm: VRM, matName: string, file: File): Promise<void> {
   const url = URL.createObjectURL(file);
@@ -168,6 +202,7 @@ export async function applyTextureReplacement(vrm: VRM, matName: string, file: F
     tex.flipY = false;
     tex.colorSpace = 'srgb';
     tex.name = file.name;
+    TEX_SOURCE.set(tex, file);
     for (const m of materialsFor(vrm, matName)) {
       (m as MapMat).map = tex;
       m.needsUpdate = true;
@@ -568,7 +603,10 @@ export function syncModelEdits(vrm: VRM, restored: ModelEdits, previous: ModelEd
     const edit = restored.materials[name];
     if (edit?.textureFile) {
       const map = materialsFor(vrm, name)[0] as MapMat | undefined;
-      if (map?.map && map.map.name === edit.textureName) continue;
+      // Compare by source-File identity (not name): repeated paint commits of
+      // one material all share a textureName, and only the exact File the live
+      // texture came from proves it is already up to date.
+      if (map?.map && TEX_SOURCE.get(map.map) === edit.textureFile) continue;
       void applyTextureReplacement(vrm, name, edit.textureFile);
     } else if (prevReplaced.has(name)) {
       restoreMaterialTexture(vrm, name);
