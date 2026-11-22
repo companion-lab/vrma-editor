@@ -5,7 +5,7 @@
 // "Save model" behave exactly like any other texture replacement.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Eraser, FlipHorizontal2, Minus, Paintbrush, Pipette, Plus, RotateCcw, X } from 'lucide-react';
+import { Eraser, FlipHorizontal2, ImagePlus, Minus, Paintbrush, Pipette, Plus, RotateCcw, X } from 'lucide-react';
 import { useEditor } from '../store';
 import { resetMaterialLive, restoreMaterialTexture, textureSourceMatches } from '../lib/vrmedit/live';
 import { getPaintSession, startPaint3D, stopPaint3D } from '../lib/vrmedit/paint';
@@ -24,15 +24,37 @@ export function TexturePainter({ matName, onClose }: { matName: string; onClose:
   const [zoom, setZoom] = useState(1);
   const [zoomPct, setZoomPct] = useState(100);
   const [panning, setPanning] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  // Bumped after the canvas base changes size (image import) so the zoom
+  // display recomputes against the new natural resolution.
+  const [texVersion, setTexVersion] = useState(0);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const zoomRef = useRef(1);
   // Viewport anchor for the next zoom change (canvas fractions + wrap offsets).
   const anchorRef = useRef<{ px: number; py: number; cx: number; cy: number } | null>(null);
   const panRef = useRef<{ x: number; y: number } | null>(null);
 
-  const commitPaintEdit = (file: File) => {
-    useEditor.getState().setMaterialEdit(matName, { textureFile: file, textureName: file.name });
+  const commitPaintEdit = (file: File, displayName?: string) => {
+    useEditor.getState().setMaterialEdit(matName, { textureFile: file, textureName: displayName ?? file.name });
+  };
+
+  /** Load an image into the editor as the texture base (Import button / drop). */
+  const importImage = async (file: File) => {
+    setImporting(true);
+    try {
+      await session!.importImageFile(file);
+      const committed = await session!.commit();
+      commitPaintEdit(committed, file.name);
+      setTexVersion((v) => v + 1);
+    } catch (err) {
+      console.error(err);
+      useEditor.getState().setStatus('error', `Image import failed: ${(err as Error).message}`);
+    } finally {
+      setImporting(false);
+    }
   };
 
   // Mount the session canvas element into the dialog (it leaves the DOM while
@@ -74,7 +96,7 @@ export function TexturePainter({ matName, onClose }: { matName: string; onClose:
       wrap.scrollTop = Math.max(0, Math.min(a.py * ch - a.cy, ch - wrap.clientHeight));
     }
     setZoomPct(Math.round((canvas.clientWidth / canvas.width) * 100));
-  }, [session, mode3D, zoom]);
+  }, [session, mode3D, zoom, texVersion]);
 
   useEffect(() => {
     zoomRef.current = zoom;
@@ -319,6 +341,25 @@ export function TexturePainter({ matName, onClose }: { matName: string; onClose:
             >
               <Pipette size={12} />
             </button>
+            <button
+              className={`btn small ${importing ? 'active' : ''}`}
+              onClick={() => importInputRef.current?.click()}
+              disabled={importing}
+              title="Import an image as the texture base (or drop one onto the canvas)"
+            >
+              <ImagePlus size={12} /> {importing ? 'Importing…' : 'Import'}
+            </button>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) void importImage(f);
+              }}
+            />
             <button className="btn small" onClick={resetTexture} title="Restore this material's original texture (keeps color edits)">
               <RotateCcw size={12} /> Reset texture
             </button>
@@ -345,18 +386,29 @@ export function TexturePainter({ matName, onClose }: { matName: string; onClose:
         {!mode3D && (
           <div
             ref={wrapRef}
-            className="painter-canvas-wrap"
+            className={`painter-canvas-wrap ${dragOver ? 'drag-over' : ''}`}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const file = [...(e.dataTransfer.files ?? [])].find((f) => f.type.startsWith('image/'));
+              if (file) void importImage(file);
+            }}
             style={{ cursor: panning ? 'grabbing' : picking ? 'copy' : 'crosshair' }}
           />
         )}
         <div className="painter-foot muted">
           {mode3D
             ? 'Drag on the model to paint · right-drag orbits · middle-drag pans · Esc closes'
-            : 'Drag to paint · Ctrl+wheel/pinch zooms · middle-drag pans · Alt-click picks a color · Ctrl/Cmd+Z undoes'}
+            : 'Drag to paint · Ctrl+wheel/pinch zooms · middle-drag pans · Alt-click picks a color · drop an image to import it'}
         </div>
       </div>
     </div>

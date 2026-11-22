@@ -194,6 +194,42 @@ export class PaintSession {
     this.ctx.fill();
   }
 
+  /**
+   * Replace the canvas contents with an image file — the imported image
+   * becomes the texture base (canvas resizes to the image, capped). Re-attaches
+   * the canvas texture so the model shows it even before the first commit.
+   */
+  importImageFile(file: File): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, MAX_TEX_SIZE / Math.max(img.naturalWidth, img.naturalHeight));
+          const w = Math.max(1, Math.round(img.naturalWidth * scale));
+          const h = Math.max(1, Math.round(img.naturalHeight * scale));
+          this.canvas.width = w;
+          this.canvas.height = h;
+          this.ctx.clearRect(0, 0, w, h);
+          this.ctx.drawImage(img, 0, 0, w, h);
+          this.lastCommitFile = undefined;
+          applyLiveTexture(this.vrm, this.matName, this.texture);
+          this.texture.needsUpdate = true;
+          URL.revokeObjectURL(url);
+          resolve();
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error(`Could not load image: ${file.name}`));
+      };
+      img.src = url;
+    });
+  }
+
   endStroke(): void {
     this.last = null;
   }
