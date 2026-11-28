@@ -168,7 +168,8 @@ export function MotionPanel() {
     );
     const keys = Object.values(clip.tracks).reduce((n, k) => n + k, 0) + clip.hipsKeys;
     const s = useEditor.getState();
-    s.importAnim(clip.data);
+    s.addClips([clip.data]);
+    s.importAnim(structuredClone(clip.data));
     s.setPlaying(true);
     setResult({
       frames: res.frames.length,
@@ -178,7 +179,7 @@ export function MotionPanel() {
       hipsKeys: clip.hipsKeys,
       sparse: clip.sparseTracks,
     });
-    s.setStatus('ok', `Captured ${res.frames.length} frames → ${keys} keys — imported as the current animation`);
+    s.setStatus('ok', `Captured ${res.frames.length} frames → ${keys} keys — loaded as the current animation (also in the Clips shelf)`);
   };
 
   const track = async () => {
@@ -231,7 +232,8 @@ export function MotionPanel() {
 
       const coverage = extract.frames.length / Math.max(1, extract.totalFrames);
       const keys = Object.values(res.tracks).reduce((n, k) => n + k, 0) + res.hipsKeys;
-      s.importAnim(res.data);
+      s.addClips([res.data]);
+      s.importAnim(structuredClone(res.data));
       s.setPlaying(true);
       setResult({
         frames: extract.frames.length,
@@ -241,7 +243,7 @@ export function MotionPanel() {
         hipsKeys: res.hipsKeys,
         sparse: res.sparseTracks,
       });
-      status('ok', `Tracked ${extract.frames.length} frames → ${keys} keys — imported as the current animation`);
+      status('ok', `Tracked ${extract.frames.length} frames → ${keys} keys — loaded as the current animation (also in the Clips shelf)`);
     } catch (err) {
       const msg = (err as Error)?.message ?? String(err);
       status(

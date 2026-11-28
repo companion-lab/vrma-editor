@@ -5,9 +5,11 @@ import {
   Copy,
   Diamond,
   Eraser,
+  Film,
   Footprints,
   KeyRound,
   Maximize2,
+  MoreHorizontal,
   Pause,
   Play,
   Repeat,
@@ -18,6 +20,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { HIPS_TRACK_ID, exprNameOf, exprTrackId, isExprTrack, useEditor } from '../store';
+import type { AnimClip } from '../store';
 import { BONE_ORDER_INDEX, prettyBoneName } from '../lib/humanoid';
 import type { ExprKey, PosKey, RotKey } from '../lib/vrma/parse';
 
@@ -264,6 +267,7 @@ export function Timeline() {
   const hasClipboard = useEditor((s) => s.keyClipboard != null);
   const clipCount = useEditor((s) => s.keyClipboard?.reduce((n, t) => n + t.keys.length, 0) ?? 0);
   const timelineH = useEditor((s) => s.timelineH);
+  const clips = useEditor((s) => s.clips);
   const st = useEditor;
 
   // footer resize: drag the top handle up/down, double-click to reset.
@@ -826,6 +830,101 @@ export function Timeline() {
     spanDragRef.current = null;
   }, []);
 
+  // --- Clips shelf (imported VRMA animations to combine) ---
+  // Chips are drag sources: drag one over the timeline and release to splice
+  // the clip in at that time (later keys shift right); Alt while dropping
+  // overlays it instead (only the bones the clip animates change). A plain
+  // click opens the menu with the same actions plus load/remove.
+  const [clipMenu, setClipMenu] = useState<{ x: number; y: number; clip: AnimClip } | null>(null);
+  const clipMenuRef = useRef<HTMLDivElement>(null);
+  const [clipDrag, setClipDrag] = useState<{ clip: AnimClip; anchor: number; alt: boolean } | null>(null);
+  const clipDragRef = useRef<{ clip: AnimClip; moved: boolean; x0: number; y0: number } | null>(null);
+
+  const clipAnchor = useCallback(
+    (clientX: number) => Math.min(Math.max(timeFromEvent(clientX), 0), useEditor.getState().duration),
+    [timeFromEvent],
+  );
+
+  const onChipPointerDown = useCallback((e: React.PointerEvent, clip: AnimClip) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // capture unavailable — the drag then only works while the pointer
+      // stays on the chip
+    }
+    clipDragRef.current = { clip, moved: false, x0: e.clientX, y0: e.clientY };
+  }, []);
+
+  const onChipPointerMove = (e: React.PointerEvent) => {
+    const d = clipDragRef.current;
+    if (!d) return;
+    if (!d.moved) {
+      if (Math.abs(e.clientX - d.x0) < 5 && Math.abs(e.clientY - d.y0) < 5) return;
+      d.moved = true;
+    }
+    setClipDrag({ clip: d.clip, anchor: clipAnchor(e.clientX), alt: e.altKey });
+  };
+
+  const onChipPointerUp = (e: React.PointerEvent) => {
+    const d = clipDragRef.current;
+    clipDragRef.current = null;
+    if (!d) return;
+    if (!d.moved) {
+      // Plain click: menu at the chip.
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setClipMenu({ x: r.left, y: r.bottom + 4, clip: d.clip });
+      return;
+    }
+    // Drop only over the timeline area — releasing anywhere else cancels.
+    const r = scrollRef.current?.getBoundingClientRect();
+    const inside =
+      !!r && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    setClipDrag(null);
+    if (!inside) return;
+    const anchor = clipAnchor(e.clientX);
+    const s = st.getState();
+    if (e.altKey) s.mergeClip(d.clip.id, anchor);
+    else s.insertClip(d.clip.id, anchor);
+  };
+
+  // Close the clip menu on outside click / Escape / resize, like the timeline
+  // context menu.
+  useEffect(() => {
+    if (!clipMenu) return;
+    const onDown = (e: PointerEvent) => {
+      if (clipMenuRef.current?.contains(e.target as Node)) return;
+      setClipMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setClipMenu(null);
+      }
+    };
+    const close = () => setClipMenu(null);
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [clipMenu]);
+
+  // Keep the clip menu on screen once measured.
+  useLayoutEffect(() => {
+    const el = clipMenuRef.current;
+    if (!el || !clipMenu) return;
+    const r = el.getBoundingClientRect();
+    let { x, y } = clipMenu;
+    if (r.right > window.innerWidth - 8) x = window.innerWidth - 8 - r.width;
+    if (r.bottom > window.innerHeight - 8) y = window.innerHeight - 8 - r.height;
+    if (x !== clipMenu.x || y !== clipMenu.y) setClipMenu({ ...clipMenu, x, y });
+  });
+
   const rulerTicks = useMemo(() => {
     const step = snap > 0 ? snap : pps >= 180 ? 0.1 : pps >= 90 ? 0.25 : pps >= 45 ? 0.5 : 1;
     const labelEvery = step * pps < 48 ? Math.ceil(48 / (step * pps)) : 1;
@@ -899,6 +998,24 @@ export function Timeline() {
         : { label: 'Paste — clipboard is empty', disabled: true },
     );
   }
+
+  const clipMenuItems: MenuItem[] = clipMenu
+    ? [
+        {
+          label: 'Insert at playhead — later keys shift right',
+          run: () => st.getState().insertClip(clipMenu.clip.id),
+        },
+        { label: 'Append at the end', run: () => st.getState().appendClip(clipMenu.clip.id) },
+        {
+          label: 'Merge over playhead — only the clip\u2019s bones change',
+          run: () => st.getState().mergeClip(clipMenu.clip.id),
+        },
+        'sep',
+        { label: 'Load (replace the current animation)', run: () => st.getState().loadClip(clipMenu.clip.id) },
+        'sep',
+        { label: 'Remove from Clips', danger: true, run: () => st.getState().removeClip(clipMenu.clip.id) },
+      ]
+    : [];
 
   return (
     <div className="timeline" style={{ height: timelineH }}>
@@ -1047,6 +1164,42 @@ export function Timeline() {
         </button>
       </div>
 
+      {/* Clips shelf: every imported VRMA, draggable onto the timeline to
+          combine. Hidden until at least one clip exists. */}
+      {clips.length > 0 && (
+        <div className="clips-bar">
+          <span className="clips-label">
+            <Film size={11} /> Clips
+          </span>
+          <div className="clips-chips">
+            {clips.map((c) => (
+              <div
+                key={c.id}
+                className={`clip-chip${clipDrag?.clip.id === c.id ? ' dragging' : ''}`}
+                title={`${c.name} — ${c.duration.toFixed(2)}s\nDrag onto the timeline: insert there, later keys shift right (hold Alt: merge over, only the clip's bones change)\nClick: menu (insert at playhead / append at end / merge / load / remove)`}
+                onPointerDown={(e) => onChipPointerDown(e, c)}
+                onPointerMove={onChipPointerMove}
+                onPointerUp={onChipPointerUp}
+              >
+                <span className="clip-chip-name">{c.name}</span>
+                <span className="clip-chip-dur">{c.duration.toFixed(1)}s</span>
+                <button
+                  className="clip-chip-menu"
+                  title="Clip actions"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setClipMenu({ x: r.left, y: r.bottom + 4, clip: c });
+                  }}
+                >
+                  <MoreHorizontal size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="tl-scroll" ref={scrollRef}>
         <div className="tl-content" ref={contentRef} style={{ width: LABEL_W + contentW }}>
           {/* alternating per-second bands */}
@@ -1136,7 +1289,20 @@ export function Timeline() {
 
           {!hasKeys && (
             <div className="tl-empty">
-              No keyframes yet — pose the model and press <kbd>K</kbd> to key the selected bone.
+              No keyframes yet — pose the model and press <kbd>K</kbd>, or Import a .vrma (multiple files land in the
+              Clips shelf above, ready to drag onto the timeline).
+            </div>
+          )}
+
+          {/* clip placement preview while dragging a chip over the timeline */}
+          {clipDrag && (
+            <div
+              className={`clip-preview${clipDrag.alt ? ' alt' : ''}`}
+              style={{ left: LABEL_W + clipDrag.anchor * pps, width: Math.max(4, clipDrag.clip.duration * pps) }}
+            >
+              <span>
+                {clipDrag.clip.name} — {clipDrag.alt ? 'merge over' : 'insert'} at {clipDrag.anchor.toFixed(2)}s
+              </span>
             </div>
           )}
 
@@ -1199,6 +1365,35 @@ export function Timeline() {
                 disabled={it.disabled}
                 onClick={() => {
                   closeMenu();
+                  it.run?.();
+                }}
+              >
+                {it.label}
+              </button>
+            ),
+          )}
+        </div>
+      )}
+
+      {/* Clips shelf menu — insert / append / merge / load / remove. */}
+      {clipMenu && (
+        <div
+          className="tl-menu"
+          ref={clipMenuRef}
+          style={{ left: clipMenu.x, top: clipMenu.y }}
+          role="menu"
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {clipMenuItems.map((it, i) =>
+            it === 'sep' ? (
+              <div key={i} className="tl-menu-sep" />
+            ) : (
+              <button
+                key={i}
+                className={`tl-menu-item${it.danger ? ' danger' : ''}`}
+                disabled={it.disabled}
+                onClick={() => {
+                  setClipMenu(null);
                   it.run?.();
                 }}
               >

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useEditor, makeSampleData, countModelEdits } from '../store';
 import { parseVRMA } from '../lib/vrma/parse';
+import type { VrmaData } from '../lib/vrma/parse';
 import { buildVRMA } from '../lib/vrma/build';
 import { exportEditedModel } from '../lib/vrmedit/exportModel';
 
@@ -90,17 +91,38 @@ export function Toolbar() {
     useEditor.getState().setMotionVideo(null, null);
   };
 
-  const importVRMA = async (file: File) => {
-    try {
-      const data = parseVRMA(await file.arrayBuffer());
-      useEditor.getState().importAnim(data);
-      useEditor
-        .getState()
-        .setStatus('ok', `Imported "${data.name}" (${data.duration.toFixed(2)}s)`);
-    } catch (err) {
-      console.error(err);
-      useEditor.getState().setStatus('error', `VRMA import failed: ${(err as Error).message}`);
+  // Import one or more .vrma files. Every parsed file lands in the Clips
+  // shelf (below the timeline) so it can be combined later; the first one
+  // also loads as the current animation, like a single import always did.
+  const importVRMAFiles = async (files: FileList) => {
+    const st = useEditor.getState();
+    const loaded: VrmaData[] = [];
+    let firstError: string | null = null;
+    for (const file of Array.from(files)) {
+      try {
+        const data = parseVRMA(await file.arrayBuffer());
+        // The file name beats the generic fallback in the shelf.
+        if (data.name === 'Imported animation') data.name = file.name.replace(/\.[^.]+$/, '');
+        loaded.push(data);
+      } catch (err) {
+        console.error(err);
+        if (!firstError) firstError = `${file.name}: ${(err as Error).message}`;
+      }
     }
+    if (loaded.length === 0) {
+      st.setStatus('error', `VRMA import failed: ${firstError}`);
+      return;
+    }
+    st.addClips(loaded);
+    st.importAnim(structuredClone(loaded[0]));
+    const extra = loaded.length - 1;
+    const failed = firstError ? ` — 1 file failed: ${firstError}` : '';
+    st.setStatus(
+      'ok',
+      extra > 0
+        ? `Imported ${loaded.length} animations — "${loaded[0].name}" loaded, ${extra} more in the Clips shelf below the timeline${failed}`
+        : `Imported "${loaded[0].name}" (${loaded[0].duration.toFixed(2)}s)${failed}`,
+    );
   };
 
   const exportVRMA = () => {
@@ -216,15 +238,23 @@ export function Toolbar() {
 
       <div className="vsep" />
 
-      <button className="btn" onClick={() => vrmaInputRef.current?.click()} title="Import a .vrma animation">
+      <button
+        className="btn"
+        onClick={() => vrmaInputRef.current?.click()}
+        title="Import one or more .vrma animations — extras land in the Clips shelf under the timeline to combine"
+      >
         <FileInput size={14} /> Import
       </button>
       <input
         ref={vrmaInputRef}
         type="file"
         accept=".vrma,.glb,.gltf"
+        multiple
         hidden
-        onChange={(e) => e.target.files?.[0] && importVRMA(e.target.files[0])}
+        onChange={(e) => {
+          if (e.target.files?.length) importVRMAFiles(e.target.files);
+          e.target.value = '';
+        }}
       />
       <button className="btn" onClick={exportVRMA} disabled={exporting} title="Export the animation as .vrma">
         <Download size={14} /> Export VRMA

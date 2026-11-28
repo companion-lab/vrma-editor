@@ -276,6 +276,137 @@ function staticExpressionWeight(
   return s.modelEdits.expressions[name] ?? s.modelBakedExpressions[name] ?? 0;
 }
 
+// --- VRMA clip shelf: imported animations kept as reusable sources for
+// combining on the timeline (see the Clips bar under the transport). Like the
+// motion video they are sources, not editor content — not part of history. ---
+
+export interface AnimClip {
+  id: number;
+  name: string;
+  duration: number;
+  /** Parsed VRMA data; never mutated by the editor (merges clone keys). */
+  data: VrmaData;
+}
+
+let clipSeq = 1;
+
+const KEY_EPS = 1e-6;
+
+/** Merge a clip's keys into the editor's tracks at `anchor` and return the
+ *  merged tracks + duration. 'insert' splices: every key at/after the anchor
+ *  shifts right by the clip's duration and the clip fills the gap. 'overlay'
+ *  gives the clip ownership of only the tracks it animates inside
+ *  [anchor, anchor + duration] — other tracks keep their keys (layering).
+ *  Clip hips keys are rescaled from the clip's rest hips height into the
+ *  current animation's rest space, so the playback rescale (restHipsY ratio)
+ *  reproduces the clip's authored motion on the merged timeline. */
+function mergeClipTracks(
+  st: {
+    rotTracks: Partial<Record<string, RotKey[]>>;
+    hipsTrack: PosKey[];
+    exprTracks: Record<string, ExprKey[]>;
+    duration: number;
+    animRestHipsY: number;
+  },
+  clip: AnimClip,
+  anchor: number,
+  mode: 'insert' | 'overlay',
+): {
+  rotTracks: Partial<Record<string, RotKey[]>>;
+  hipsTrack: PosKey[];
+  exprTracks: Record<string, ExprKey[]>;
+  duration: number;
+} {
+  const dur = clip.duration;
+  const end = anchor + dur;
+  const hipsScale = clip.data.restHipsY > 1e-3 ? st.animRestHipsY / clip.data.restHipsY : 1;
+
+  const rotTracks = { ...st.rotTracks };
+  const exprTracks = { ...st.exprTracks };
+  let hipsTrack = st.hipsTrack;
+
+  if (mode === 'insert') {
+    // Cut at the anchor: everything from the anchor on moves right by the
+    // clip's length, spacing preserved. Keys exactly at the anchor belong to
+    // the following segment and shift with it — except when the anchor is at
+    // the very end (a pure append): there the keys at the anchor are the
+    // previous segment's final pose and must stay put under the clip.
+    const appending = anchor >= st.duration - KEY_EPS;
+    const shouldShift = (t: number) => !appending && t >= anchor - KEY_EPS;
+    const shiftRot = (keys: RotKey[]): RotKey[] =>
+      keys.map((k) => (shouldShift(k.t) ? { ...k, t: k.t + dur } : k));
+    const shiftExpr = (keys: ExprKey[]): ExprKey[] =>
+      keys.map((k) => (shouldShift(k.t) ? { ...k, t: k.t + dur } : k));
+    const shiftPos = (keys: PosKey[]): PosKey[] =>
+      keys.map((k) => (shouldShift(k.t) ? { ...k, t: k.t + dur } : k));
+    for (const bone of Object.keys(rotTracks)) {
+      const keys = rotTracks[bone];
+      if (keys && keys.length > 0) rotTracks[bone] = shiftRot(keys);
+    }
+    for (const name of Object.keys(exprTracks)) {
+      const keys = exprTracks[name];
+      if (keys.length > 0) exprTracks[name] = shiftExpr(keys);
+    }
+    if (hipsTrack.length > 0) hipsTrack = shiftPos(hipsTrack);
+  }
+
+  // Place the clip's keys, cloned with fresh ids. The clip owns its window on
+  // every track it animates: existing keys inside [anchor, end] are dropped
+  // (the clip's boundary keys win), keys outside stay. In 'insert' mode the
+  // window is already empty, so this just fills it.
+  const place = <K extends { t: number; id: number }>(
+    list: K[],
+    clipKeys: K[],
+    make: (k: K) => K,
+  ): K[] => {
+    const kept = list.filter((k) => k.t < anchor - KEY_EPS || k.t > end + KEY_EPS);
+    return kept.concat(clipKeys.map((k) => make(k))).sort((a, b) => a.t - b.t);
+  };
+  for (const [bone, keys] of Object.entries(clip.data.rotTracks)) {
+    if (keys && keys.length > 0) {
+      rotTracks[bone] = place(rotTracks[bone] ?? [], keys, (k) => ({
+        id: allocKeyId(),
+        t: k.t + anchor,
+        q: [...k.q],
+        ease: k.ease,
+        bez: k.bez,
+      }));
+    }
+  }
+  for (const [name, keys] of Object.entries(clip.data.exprTracks)) {
+    if (keys.length > 0) {
+      exprTracks[name] = place(exprTracks[name] ?? [], keys, (k) => ({
+        id: allocKeyId(),
+        t: k.t + anchor,
+        w: k.w,
+        ease: k.ease,
+        bez: k.bez,
+      }));
+    }
+  }
+  if (clip.data.hipsTrack.length > 0) {
+    hipsTrack = place(hipsTrack, clip.data.hipsTrack, (k) => ({
+      id: allocKeyId(),
+      t: k.t + anchor,
+      p: [k.p[0] * hipsScale, k.p[1] * hipsScale, k.p[2] * hipsScale],
+      ease: k.ease,
+      bez: k.bez,
+    }));
+  }
+
+  // Cover everything the merge created (both modes can extend the clip).
+  let maxT = st.duration;
+  for (const keys of Object.values(rotTracks)) {
+    if (keys && keys.length > 0) maxT = Math.max(maxT, keys[keys.length - 1].t);
+  }
+  for (const keys of Object.values(exprTracks)) {
+    if (keys.length > 0) maxT = Math.max(maxT, keys[keys.length - 1].t);
+  }
+  if (hipsTrack.length > 0) maxT = Math.max(maxT, hipsTrack[hipsTrack.length - 1].t);
+
+  return { rotTracks, hipsTrack, exprTracks, duration: maxT };
+}
+
 export interface Status {
   kind: 'info' | 'ok' | 'error';
   msg: string;
@@ -326,6 +457,10 @@ interface EditorState {
   exprTracks: Record<string, ExprKey[]>;
   /** Rest hips height (Y) of the rig the animation was authored on. */
   animRestHipsY: number;
+
+  /** Imported VRMA animations kept as reusable sources for combining on the
+   *  timeline (the Clips bar). Session-only, not part of undo/history. */
+  clips: AnimClip[];
 
   /** Motion-reference video loaded via the toolbar (blob URL). Not part of
    *  undo/history — it is a source, not editor content. */
@@ -508,6 +643,25 @@ interface EditorState {
    *  ground across the whole animation. Null when there is no model or no
    *  foot/toe bones to measure. One undo step. */
   groundFeet: () => { sampled: number; maxDrop: number; maxLift: number; hipsKeys: number } | null;
+
+  // --- VRMA clip shelf ---
+  /** Add parsed VRMAs to the Clips shelf (no effect on the timeline). */
+  addClips: (datas: VrmaData[]) => void;
+  removeClip: (id: number) => void;
+  /** Replace the current animation with a shelf clip (one undo step). */
+  loadClip: (id: number) => void;
+  /** Shared core of insert/merge: anchor at `atTime` (default the playhead),
+   *  one undo step, playhead on the merge point. */
+  placeClip: (id: number, atTime: number | undefined, mode: 'insert' | 'overlay') => void;
+  /** Splice a clip in at `atTime` (default the playhead): every key from the
+   *  anchor on shifts right by the clip's duration. One undo step. */
+  insertClip: (id: number, atTime?: number) => void;
+  /** Splice a clip in at the end of the current animation (at 0 when empty). */
+  appendClip: (id: number) => void;
+  /** Overlay a clip at `atTime` (default the playhead): the bones the clip
+   *  animates take over inside its window; other tracks keep their keys.
+   *  One undo step. */
+  mergeClip: (id: number, atTime?: number) => void;
 }
 
 const clone = <T,>(v: T): T => structuredClone(v);
@@ -574,6 +728,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   hipsTrack: [],
   exprTracks: {},
   animRestHipsY: 1,
+  clips: [],
 
   motionVideoUrl: null,
   motionVideoName: null,
@@ -1968,6 +2123,65 @@ export const useEditor = create<EditorState>()((set, get) => ({
       selectedKeys: [],
     }));
   },
+
+  // --- VRMA clip shelf ---
+
+  addClips: (datas) =>
+    set((s) => ({
+      clips: [
+        ...s.clips,
+        ...datas.map((data) => ({ id: clipSeq++, name: data.name, duration: data.duration, data })),
+      ],
+    })),
+
+  removeClip: (id) => set((s) => ({ clips: s.clips.filter((c) => c.id !== id) })),
+
+  loadClip: (id) => {
+    const clip = get().clips.find((c) => c.id === id);
+    if (!clip) return;
+    // Clone: importAnim adopts the track arrays, and the shelf copy must stay
+    // a pristine merge source.
+    get().importAnim(structuredClone(clip.data));
+  },
+
+  // Shared core of insert/merge: anchor to the (snapped) time, one history
+  // push, merged tracks in, playhead on the merge point, nothing selected.
+  placeClip: (id, atTime, mode) => {
+    const st = get();
+    const clip = st.clips.find((c) => c.id === id);
+    if (!clip) return;
+    const anchor = st.snapTime(atTime ?? st.time);
+    st.pushHistory();
+    const merged = mergeClipTracks(st, clip, anchor, mode);
+    clearManipulated();
+    set({
+      ...merged,
+      time: Math.min(anchor, merged.duration),
+      selectedKey: null,
+      selectedKeys: [],
+    });
+    st.setStatus(
+      'ok',
+      mode === 'insert'
+        ? `Inserted "${clip.name}" at ${anchor.toFixed(2)}s — later keys shifted right (undoable)`
+        : `Merged "${clip.name}" over ${anchor.toFixed(2)}–${(anchor + clip.duration).toFixed(2)}s (undoable)`,
+    );
+  },
+
+  insertClip: (id, atTime) => get().placeClip(id, atTime, 'insert'),
+
+  // Appending to an empty timeline starts at 0 instead of the default
+  // duration's end (which would leave dead space before the clip).
+  appendClip: (id) => {
+    const st = get();
+    const empty =
+      Object.values(st.rotTracks).every((k) => (k?.length ?? 0) === 0) &&
+      st.hipsTrack.length === 0 &&
+      Object.values(st.exprTracks).every((k) => k.length === 0);
+    get().insertClip(id, empty ? 0 : st.duration);
+  },
+
+  mergeClip: (id, atTime) => get().placeClip(id, atTime, 'overlay'),
 }));
 
 // Tiny sample animation (a wave) so users can immediately try playback/scrub.

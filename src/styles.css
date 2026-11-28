@@ -1163,6 +1163,126 @@ input[type='range']::-moz-range-thumb {
   margin: 4px 2px;
 }
 
+/* ---------- clips shelf (imported VRMA animations to combine) ---------- */
+.clips-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.clips-label {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.clips-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.clip-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  padding: 2px 3px 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--panel-2);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.clip-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.clip-chip.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.clip-chip-name {
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.clip-chip-dur {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.clip-chip-menu {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.clip-chip-menu:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* placement preview while dragging a chip over the timeline */
+.clip-preview {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Alt-drop = overlay merge: the second accent marks the different mode */
+.clip-preview.alt {
+  background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent-2) 65%, transparent);
+}
+
+.clip-preview span {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 10px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.clip-preview.alt span {
+  color: var(--accent-2);
+}
+
 /* ---------- model panel ---------- */
 .model-body {
   padding: 0 8px 12px;
