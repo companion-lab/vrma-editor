@@ -1,21 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bot, CheckCircle2, Eraser, ImagePlus, Send, Settings, Square, X, XCircle } from 'lucide-react';
-import { runAgent, type AgentEvent, type AgentRunHandle } from '../lib/ai/agent';
-import type { ToolResult } from '../lib/ai/execute';
-import {
-  loadSettings,
-  saveSettings,
-  PROVIDER_PRESETS,
-  type AISettings,
-  type WireMessage,
-} from '../lib/ai/provider';
+import { useAiChat, type ChatEntry } from '../lib/ai/chatStore';
+import { loadSettings, saveSettings, PROVIDER_PRESETS, type AISettings } from '../lib/ai/provider';
 import { useAiBridgeConnected } from '../lib/ai/bridge';
-
-type ChatEntry =
-  | { kind: 'user'; text: string; images?: string[] }
-  | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; args: Record<string, unknown>; result: ToolResult; image?: string }
-  | { kind: 'error'; text: string };
 
 /** Read an image file into a downscaled data URL (long side ≤1024px, huge
  * PNGs fall back to JPEG on white) so attachments stay well under the
@@ -152,15 +139,17 @@ function ToolChip({ entry }: { entry: Extract<ChatEntry, { kind: 'tool' }> }) {
 // --- Panel ---
 
 export function AIPanel() {
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
-  const [input, setInput] = useState('');
-  const [attachments, setAttachments] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
+  // Chat state lives in the session store (lib/ai/chatStore) so switching
+  // inspector tabs — which unmounts this panel — keeps the conversation, the
+  // "thinking…" indicator and an in-flight run (whose events keep landing)
+  // intact instead of resetting both when the user comes back.
+  const entries = useAiChat((s) => s.entries);
+  const busy = useAiChat((s) => s.busy);
+  const input = useAiChat((s) => s.input);
+  const attachments = useAiChat((s) => s.attachments);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const bridgeConnected = useAiBridgeConnected();
-  const conversationRef = useRef<WireMessage[]>([]);
-  const runRef = useRef<AgentRunHandle | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
@@ -169,54 +158,22 @@ export function AIPanel() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [entries, busy]);
 
-  const push = (e: ChatEntry) => setEntries((prev) => [...prev, e]);
-
-  const onEvent = (ev: AgentEvent) => {
-    if (ev.kind === 'assistant') {
-      if (ev.text) push({ kind: 'assistant', text: ev.text });
-    } else if (ev.kind === 'tool') {
-      push({ kind: 'tool', name: ev.name, args: ev.args, result: ev.result, image: ev.image });
-    } else if (ev.kind === 'error') {
-      push({ kind: 'error', text: ev.message });
-    }
-  };
-
   /** Turn picked/pasted/dropped image files into downscaled attachments. */
   const addImages = async (files: Iterable<File>) => {
     for (const f of [...files]) {
       if (!f.type.startsWith('image/')) continue;
       try {
         const url = await fileToImageDataUrl(f);
-        setAttachments((prev) => [...prev, url]);
+        useAiChat.getState().addAttachments([url]);
       } catch (err) {
-        push({ kind: 'error', text: `Could not read image “${f.name || 'clipboard'}”: ${(err as Error).message}` });
+        useAiChat.getState().push({ kind: 'error', text: `Could not read image “${f.name || 'clipboard'}”: ${(err as Error).message}` });
       }
     }
   };
 
-  const send = () => {
-    const text = input.trim();
-    if (busy || (!text && attachments.length === 0)) return;
-    const images = attachments;
-    setInput('');
-    setAttachments([]);
-    push({ kind: 'user', text: text || '[image]', images: images.length ? images : undefined });
-    setBusy(true);
-    const handle = runAgent(conversationRef.current, text || '[image attached]', images, onEvent);
-    runRef.current = handle;
-    handle.promise.finally(() => {
-      setBusy(false);
-      if (runRef.current === handle) runRef.current = null;
-    });
-  };
-
-  const stop = () => runRef.current?.cancel();
-
-  const clear = () => {
-    if (busy) stop();
-    conversationRef.current = [];
-    setEntries([]);
-  };
+  const send = () => useAiChat.getState().send();
+  const stop = () => useAiChat.getState().stop();
+  const clear = () => useAiChat.getState().clear();
 
   return (
     <div
@@ -297,7 +254,7 @@ export function AIPanel() {
               <button
                 className="ai-attach-remove"
                 title="Remove image"
-                onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                onClick={() => useAiChat.getState().removeAttachment(i)}
               >
                 <X size={11} />
               </button>
@@ -330,7 +287,7 @@ export function AIPanel() {
           value={input}
           placeholder="Ask the assistant…"
           rows={2}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => useAiChat.getState().setInput(e.target.value)}
           onPaste={(e) => {
             const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'));
             if (files.length > 0) {
