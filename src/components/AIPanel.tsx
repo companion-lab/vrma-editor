@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Bot, CheckCircle2, Eraser, Send, Settings, Square, XCircle } from 'lucide-react';
+import { Bot, CheckCircle2, Eraser, ImagePlus, Send, Settings, Square, X, XCircle } from 'lucide-react';
 import { runAgent, type AgentEvent, type AgentRunHandle } from '../lib/ai/agent';
 import type { ToolResult } from '../lib/ai/execute';
 import {
@@ -12,10 +12,37 @@ import {
 import { useAiBridgeConnected } from '../lib/ai/bridge';
 
 type ChatEntry =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; images?: string[] }
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; name: string; args: Record<string, unknown>; result: ToolResult; image?: string }
   | { kind: 'error'; text: string };
+
+/** Read an image file into a downscaled data URL (long side ≤1024px, huge
+ * PNGs fall back to JPEG on white) so attachments stay well under the
+ * /api/chat proxy's request size limit. */
+async function fileToImageDataUrl(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+  const url = canvas.toDataURL(type, 0.9);
+  if (url.length <= 1_500_000) return url;
+  // Still oversized (detailed PNG) → re-encode as JPEG, alpha is lost.
+  const flat = document.createElement('canvas');
+  flat.width = w;
+  flat.height = h;
+  const ctx = flat.getContext('2d')!;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(canvas, 0, 0);
+  return flat.toDataURL('image/jpeg', 0.85);
+}
 
 // --- Settings dialog ---
 
@@ -127,12 +154,16 @@ function ToolChip({ entry }: { entry: Extract<ChatEntry, { kind: 'tool' }> }) {
 export function AIPanel() {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const bridgeConnected = useAiBridgeConnected();
   const conversationRef = useRef<WireMessage[]>([]);
   const runRef = useRef<AgentRunHandle | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -150,13 +181,28 @@ export function AIPanel() {
     }
   };
 
+  /** Turn picked/pasted/dropped image files into downscaled attachments. */
+  const addImages = async (files: Iterable<File>) => {
+    for (const f of [...files]) {
+      if (!f.type.startsWith('image/')) continue;
+      try {
+        const url = await fileToImageDataUrl(f);
+        setAttachments((prev) => [...prev, url]);
+      } catch (err) {
+        push({ kind: 'error', text: `Could not read image “${f.name || 'clipboard'}”: ${(err as Error).message}` });
+      }
+    }
+  };
+
   const send = () => {
     const text = input.trim();
-    if (!text || busy) return;
+    if (busy || (!text && attachments.length === 0)) return;
+    const images = attachments;
     setInput('');
-    push({ kind: 'user', text });
+    setAttachments([]);
+    push({ kind: 'user', text: text || '[image]', images: images.length ? images : undefined });
     setBusy(true);
-    const handle = runAgent(conversationRef.current, text, onEvent);
+    const handle = runAgent(conversationRef.current, text || '[image attached]', images, onEvent);
     runRef.current = handle;
     handle.promise.finally(() => {
       setBusy(false);
@@ -173,7 +219,26 @@ export function AIPanel() {
   };
 
   return (
-    <div className="ai-panel">
+    <div
+      className={`ai-panel${dragOver ? ' dragover' : ''}`}
+      onDragEnter={(e) => {
+        if (![...e.dataTransfer.types].includes('Files')) return;
+        e.preventDefault();
+        dragDepthRef.current++;
+        setDragOver(true);
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDragLeave={() => {
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        dragDepthRef.current = 0;
+        setDragOver(false);
+        if (e.dataTransfer.files.length) void addImages(e.dataTransfer.files);
+      }}
+    >
       <div className="ai-head">
         <span className="ai-title">
           <Bot size={14} /> Assistant
@@ -194,12 +259,24 @@ export function AIPanel() {
         {entries.length === 0 && (
           <div className="muted pad small">
             Ask the assistant to animate or edit the model — e.g. “wave both arms for 2 seconds”,
-            “make the jacket red”, “crouch and then jump”. Configure an endpoint in the settings
-            (gear) first.
+            “make the jacket red”, “crouch and then jump”. You can also attach an image (📎 button,
+            paste or drag-drop) for vision models. Configure an endpoint in the settings (gear) first.
           </div>
         )}
         {entries.map((e, i) => {
-          if (e.kind === 'user') return <div key={i} className="ai-msg user">{e.text}</div>;
+          if (e.kind === 'user')
+            return (
+              <div key={i} className="ai-msg user">
+                {e.images && (
+                  <div className="ai-msg-images">
+                    {e.images.map((src, j) => (
+                      <img key={j} src={src} alt="attached image" />
+                    ))}
+                  </div>
+                )}
+                {e.text}
+              </div>
+            );
           if (e.kind === 'assistant') return <div key={i} className="ai-msg assistant">{e.text}</div>;
           if (e.kind === 'error') return <div key={i} className="ai-msg error">{e.text}</div>;
           return (
@@ -212,12 +289,55 @@ export function AIPanel() {
         {busy && <div className="ai-msg thinking">thinking…</div>}
       </div>
 
+      {attachments.length > 0 && (
+        <div className="ai-attach-row">
+          {attachments.map((url, i) => (
+            <div key={i} className="ai-attach-thumb">
+              <img src={url} alt="" />
+              <button
+                className="ai-attach-remove"
+                title="Remove image"
+                onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="ai-input-row">
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(e) => {
+            if (e.target.files?.length) void addImages(e.target.files);
+            e.target.value = '';
+          }}
+        />
+        <button
+          className="btn icon"
+          title="Attach image — you can also paste or drop one"
+          disabled={busy}
+          onClick={() => fileRef.current?.click()}
+        >
+          <ImagePlus size={14} />
+        </button>
         <textarea
           value={input}
           placeholder="Ask the assistant…"
           rows={2}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={(e) => {
+            const files = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'));
+            if (files.length > 0) {
+              e.preventDefault();
+              void addImages(files);
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
@@ -230,7 +350,12 @@ export function AIPanel() {
             <Square size={14} />
           </button>
         ) : (
-          <button className="btn icon accent" title="Send (Enter)" onClick={send} disabled={!input.trim()}>
+          <button
+            className="btn icon accent"
+            title="Send (Enter)"
+            onClick={send}
+            disabled={!input.trim() && attachments.length === 0}
+          >
             <Send size={14} />
           </button>
         )}

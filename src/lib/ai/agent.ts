@@ -146,6 +146,7 @@ export interface AgentRunHandle {
 export function runAgent(
   conversation: WireMessage[],
   userText: string,
+  userImages: string[],
   onEvent: (e: AgentEvent) => void,
 ): AgentRunHandle {
   const controller = new AbortController();
@@ -157,7 +158,16 @@ export function runAgent(
     const prompt = SYSTEM_PROMPT();
     if (sys) sys.content = prompt;
     else messages.unshift({ role: 'system', content: prompt });
-    messages.push({ role: 'user', content: userText });
+    // Attached images ride along as vision parts (the same format the
+    // screenshot feedback below uses); without them it stays a plain string.
+    const userContent: string | ContentPart[] =
+      userImages.length > 0
+        ? [
+            { type: 'text', text: userText },
+            ...userImages.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+          ]
+        : userText;
+    messages.push({ role: 'user', content: userContent });
 
     try {
       let madeToolCalls = false;
@@ -267,8 +277,9 @@ function collectImages(result: ToolResult): string[] {
 }
 
 /**
- * Keep the wire history bounded: drop screenshot images from older turns and
- * shrink very old tool results (the model has already consumed them).
+ * Keep the wire history bounded: drop images (screenshots and attachments)
+ * from older turns and shrink very old tool results (the model has already
+ * consumed them).
  */
 function pruneHistory(messages: WireMessage[]): void {
   let imageBudget = KEEP_IMAGE_TURNS;
@@ -276,7 +287,7 @@ function pruneHistory(messages: WireMessage[]): void {
     const m = messages[i];
     if (m.role === 'user' && Array.isArray(m.content)) {
       if (imageBudget <= 0) {
-        messages[i] = { role: 'user', content: '[earlier viewport screenshot removed from history]' };
+        messages[i] = { role: 'user', content: '[earlier image removed from history]' };
       } else {
         imageBudget--;
       }

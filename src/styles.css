@@ -1890,6 +1890,69 @@ input[type='range']::-moz-range-thumb {
   align-self: flex-start;
 }
 
+.ai-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 4px;
+}
+
+.ai-msg-images img {
+  max-width: 170px;
+  max-height: 130px;
+  border-radius: 5px;
+  display: block;
+}
+
+.ai-attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+
+.ai-attach-thumb {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.ai-attach-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ai-attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 15px;
+  height: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+}
+
+.ai-attach-remove:hover {
+  background: var(--danger);
+}
+
+.ai-panel.dragover {
+  outline: 1px dashed var(--accent);
+  outline-offset: -3px;
+}
+
 .ai-input-row {
   display: flex;
   gap: 6px;
