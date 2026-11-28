@@ -2098,7 +2098,7 @@ input[type='range']::-moz-range-thumb {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(860px, calc(100vw - 48px));
+  width: min(1080px, calc(100vw - 48px));
   max-height: calc(100vh - 64px);
   background: var(--panel);
   border: 1px solid var(--border);
@@ -2185,8 +2185,141 @@ input[type='range']::-moz-range-thumb {
   font-variant-numeric: tabular-nums;
 }
 
-.painter-canvas-wrap {
+.painter-place-row {
+  border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+.painter-place-label {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+/* Layers sidebar: thumbnail rows (top-first), opacity/blend controls and the
+   action buttons, matching the painter's dark panel look. */
+.painter-layers {
+  flex: none;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.painter-layer-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.painter-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--row-sep);
+  cursor: pointer;
+  user-select: none;
+}
+
+.painter-layer-row:last-child {
+  border-bottom: none;
+}
+
+.painter-layer-row.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.painter-layer-row.hidden .painter-layer-thumb,
+.painter-layer-row.hidden .painter-layer-name {
+  opacity: 0.45;
+}
+
+.painter-layer-thumb {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  /* mini checkerboard so transparent layers read as transparent */
+  background-image:
+    linear-gradient(45deg, rgba(128, 128, 128, 0.18) 25%, transparent 25%, transparent 75%, rgba(128, 128, 128, 0.18) 75%),
+    linear-gradient(45deg, rgba(128, 128, 128, 0.18) 25%, transparent 25%, transparent 75%, rgba(128, 128, 128, 0.18) 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
+}
+
+.painter-layer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.painter-layer-name-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.painter-layer-badge {
+  flex: none;
+  color: var(--muted);
+}
+
+.painter-layer-ctl {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.painter-layer-ctl input[type='range'] {
+  width: 84px;
+}
+
+.painter-layer-blend {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 4px;
+}
+
+.painter-layer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* Canvas area + layers sidebar (Photoshop-style) share one row. */
+.painter-body {
+  display: flex;
+  gap: 8px;
   height: 56vh;
+  min-height: 0;
+}
+
+.painter-canvas-wrap {
+  flex: 1;
+  min-width: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -2206,6 +2339,20 @@ input[type='range']::-moz-range-thumb {
 .painter-canvas {
   display: block;
   touch-action: none;
+}
+
+/* The holder sizes with zoom; the session canvas fills it and the marching-ants
+   overlay (absolutely positioned → paints above the canvas) tracks its box. */
+.painter-canvas-holder {
+  position: relative;
+}
+
+.painter-ants {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .painter-foot {
